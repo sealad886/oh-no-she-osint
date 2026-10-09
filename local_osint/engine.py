@@ -1,0 +1,376 @@
+"""Evidence storage and deterministic indicator extraction. No network operations."""
+
+import base64
+import hashlib
+import ipaddress
+import json
+import os
+import re
+import sqlite3
+import stat
+import uuid
+from bisect import bisect_right
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from html.parser import HTMLParser
+from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
+
+MAX_BYTES = 2 * 1024 * 1024
+MAX_ENTITIES = 10000
+FORMATS = {"text", "html", "json", "csv"}
+FOCUS_TYPES = {"person", "organization", "domain", "topic", "other"}
+KINDS = {"email", "domain", "url", "ipv4", "ipv6"}
+DOMAIN = r"(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}"
+TLD_SOURCE = Path(__file__).with_name("tlds.txt")
+TLDS = frozenset(line.strip().lower() for line in TLD_SOURCE.read_text().splitlines() if line and not line.startswith("#"))
+PATTERNS = [
+    ("email", re.compile(r"(?<![\w.+-])[\w.+-]+@" + DOMAIN + r"\b", re.ASCII)),
+    ("url", re.compile(r"https?://[^\s<>\"']+", re.I)),
+    ("domain", re.compile(r"(?<![\w.-])" + DOMAIN + r"(?![\w.-])", re.ASCII)),
+    ("ipv4", re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")),
+    ("ipv6", re.compile(r"(?<![\w:])(?:[0-9a-fA-F]{0,4}:){2,}[0-9a-fA-F:.]*(?![\w:])")),
+]
+
+
+class InvalidInput(ValueError):
+    """An actionable, safe-to-display validation failure."""
+
+
+def now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def field(value, name, limit=200, required=True):
+    if not isinstance(value, str) or len(value) > limit or "\x00" in value:
+        raise InvalidInput(f"{name} must be text, up to {limit} characters.")
+    value = value.strip()
+    if required and not value:
+        raise InvalidInput(f"Enter {name.lower()}.")
+    return value
+
+
+class PlainHTML(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+        self.hidden = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in {"script", "style", "template"}:
+            self.hidden += 1
+        if not self.hidden:
+            self.parts.append("\n")
+            for key, value in attrs:
+                if key in {"href", "src"} and value:
+                    self.parts.append(value + "\n")
+
+    def handle_endtag(self, tag):
+        if tag in {"script", "style", "template"}:
+            self.hidden = max(0, self.hidden - 1)
+        if not self.hidden:
+            self.parts.append("\n")
+
+    def handle_data(self, data):
+        if not self.hidden:
+            self.parts.append(data)
+
+
+def searchable_text(raw, format):
+    if format not in FORMATS:
+        raise InvalidInput("Choose text, HTML, JSON or CSV.")
+    if not isinstance(raw, bytes) or not raw or len(raw) > MAX_BYTES:
+        raise InvalidInput("Evidence must contain 1 byte to 2 MiB.")
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise InvalidInput("Use UTF-8 text, HTML, JSON or CSV; binary files are unsupported.") from exc
+    if "\x00" in text:
+        raise InvalidInput("Binary evidence is unsupported. Convert it to UTF-8 text first.")
+    if format == "json":
+        try:
+            json.loads(text)
+        except (ValueError, RecursionError) as exc:
+            raise InvalidInput("This file is not valid JSON.") from exc
+    if format == "html":
+        parser = PlainHTML()
+        parser.feed(text)
+        text = "".join(parser.parts)
+    return text
+
+
+def indicators(text):
+    matches = []
+    url_ranges = []
+
+    def add(kind, value, start, end):
+        matches.append({"kind": kind, "value": value, "start": start, "end": end})
+        if len(matches) > MAX_ENTITIES:
+            raise InvalidInput("Evidence has over 10,000 indicator mentions. Split it into smaller files.")
+
+    # URLs establish spans so filenames and query text cannot become domain indicators.
+    url_pattern = next(pattern for kind, pattern in PATTERNS if kind == "url")
+    for match in url_pattern.finditer(text):
+        value = match.group().rstrip(".,;:!?")
+        pairs = {")": "(", "]": "[", "}": "{"}
+        while value and value[-1] in pairs and value.count(value[-1]) > value.count(pairs[value[-1]]):
+            value = value[:-1].rstrip(".,;:!?")
+        host_start, host_end = -1, -1
+        try:
+            parsed = urlsplit(value)
+            if parsed.hostname:
+                authority_start = match.start() + value.index("://") + 3
+                host_start = authority_start + parsed.netloc.lower().rfind(parsed.hostname.lower())
+                host_end = host_start + len(parsed.hostname)
+            if parsed.hostname and not parsed.username and not parsed.password:
+                # Query and fragment remain in original evidence, but not the normalized entity.
+                normalized = urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), parsed.path, "", ""))
+                add("url", normalized, match.start(), match.start() + len(value))
+        except ValueError:
+            pass
+        url_ranges.append((match.start(), match.end(), host_start, host_end))
+    url_starts = [item[0] for item in url_ranges]
+
+    for kind, pattern in PATTERNS:
+        if kind == "url":
+            continue
+        for match in pattern.finditer(text):
+            value = match.group()
+            try:
+                if kind in {"ipv4", "ipv6"}:
+                    value = str(ipaddress.ip_address(value))
+                elif kind == "email":
+                    local, domain = value.rsplit("@", 1)
+                    if domain.rsplit(".", 1)[-1].lower() not in TLDS:
+                        continue
+                    value = local + "@" + domain.lower()
+                else:
+                    value = value.lower()
+                    if value.rsplit(".", 1)[-1] not in TLDS:
+                        continue
+                    index = bisect_right(url_starts, match.start()) - 1
+                    if index >= 0:
+                        start, end, host_start, host_end = url_ranges[index]
+                        if start <= match.start() < end and not (host_start <= match.start() and match.end() <= host_end):
+                            continue
+            except ValueError:
+                continue
+            add(kind, value, match.start(), match.end())
+    return sorted(matches, key=lambda x: (x["start"], x["kind"]))
+
+
+def private_directory(path):
+    path = Path(os.path.abspath(Path(path).expanduser()))
+    # Reject symlinks at every existing component, including the final path.
+    for part in (path, *path.parents):
+        if part.is_symlink():
+            raise InvalidInput("Data directory must not contain symlinks.")
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    info = path.stat()
+    if not stat.S_ISDIR(info.st_mode):
+        raise InvalidInput("Data path must be a directory.")
+    if hasattr(os, "getuid") and info.st_uid != os.getuid():
+        raise InvalidInput("Data directory must belong to the current user.")
+    if os.name == "posix" and stat.S_IMODE(info.st_mode) & 0o077:
+        raise InvalidInput("Data directory must be private. Set its permissions to 700.")
+    return path
+
+
+class Engine:
+    def __init__(self, directory):
+        self.directory = private_directory(directory)
+        self.path = self.directory / "evidence.sqlite3"
+        if self.path.is_symlink():
+            raise InvalidInput("Database must not be a symlink.")
+        fd = os.open(self.path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise InvalidInput("Database must be a regular, unlinked private file.")
+            if hasattr(os, "getuid") and info.st_uid != os.getuid():
+                raise InvalidInput("Database must belong to the current user.")
+            if os.name == "posix" and stat.S_IMODE(info.st_mode) & 0o077:
+                raise InvalidInput("Database permissions must be 600.")
+        finally:
+            os.close(fd)
+        with self.connection() as db:
+            version = db.execute("PRAGMA user_version").fetchone()[0]
+            if version not in (0, 1):
+                raise InvalidInput("Unsupported database version. Restore a compatible backup.")
+            db.executescript("""
+                CREATE TABLE IF NOT EXISTS cases (
+                    id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at TEXT NOT NULL,
+                    focus_type TEXT NOT NULL, aliases TEXT NOT NULL, identifiers TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS evidence (
+                    id TEXT PRIMARY KEY, case_id TEXT NOT NULL REFERENCES cases(id),
+                    title TEXT NOT NULL, source TEXT NOT NULL, format TEXT NOT NULL,
+                    collected_at TEXT NOT NULL, sha256 TEXT NOT NULL, raw BLOB NOT NULL,
+                    text TEXT NOT NULL, UNIQUE(case_id, source, sha256));
+                CREATE TABLE IF NOT EXISTS entities (
+                    id TEXT PRIMARY KEY, case_id TEXT NOT NULL REFERENCES cases(id),
+                    kind TEXT NOT NULL, value TEXT NOT NULL, UNIQUE(case_id, kind, value));
+                CREATE TABLE IF NOT EXISTS mentions (
+                    entity_id TEXT NOT NULL REFERENCES entities(id),
+                    evidence_id TEXT NOT NULL REFERENCES evidence(id),
+                    start INTEGER NOT NULL, end INTEGER NOT NULL,
+                    PRIMARY KEY(entity_id, evidence_id, start, end));
+                CREATE INDEX IF NOT EXISTS evidence_case ON evidence(case_id);
+                CREATE INDEX IF NOT EXISTS entities_case ON entities(case_id);
+                CREATE INDEX IF NOT EXISTS mentions_evidence ON mentions(evidence_id);
+                PRAGMA user_version = 1;
+            """)
+
+    @contextmanager
+    def connection(self):
+        db = sqlite3.connect(self.path, timeout=5)
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA foreign_keys = ON")
+        try:
+            with db:
+                yield db
+        finally:
+            db.close()
+
+    @staticmethod
+    def case_record(row):
+        result = dict(row)
+        result["aliases"] = json.loads(result["aliases"])
+        result["identifiers"] = json.loads(result["identifiers"])
+        return result
+
+    def create_case(self, name, focus_type="topic", aliases=None, identifiers=None):
+        if focus_type not in FOCUS_TYPES:
+            raise InvalidInput("Choose person, organization, domain, topic or other.")
+        def values(items, label):
+            if items is None:
+                return []
+            if not isinstance(items, list) or len(items) > 20:
+                raise InvalidInput(f"Provide up to 20 {label.lower()} as a list.")
+            return list(dict.fromkeys(field(item, label, 200) for item in items))
+        case = {"id": uuid.uuid4().hex, "name": field(name, "Subject name", 100), "created_at": now(),
+                "focus_type": focus_type, "aliases": values(aliases, "Aliases"), "identifiers": values(identifiers, "Known identifiers")}
+        with self.connection() as db:
+            db.execute("INSERT INTO cases VALUES (?,?,?,?,?,?)", (case["id"], case["name"], case["created_at"], focus_type, json.dumps(case["aliases"]), json.dumps(case["identifiers"])))
+        return case
+
+    def cases(self):
+        with self.connection() as db:
+            return [self.case_record(x) for x in db.execute("SELECT * FROM cases ORDER BY created_at DESC")]
+
+    @staticmethod
+    def require_case(db, case_id):
+        case = db.execute("SELECT * FROM cases WHERE id = ?", (case_id,)).fetchone()
+        if not case:
+            raise InvalidInput("Case not found. Choose an existing case.")
+        return Engine.case_record(case)
+
+    def ingest(self, case_id, raw, title, source="Imported file", format="text"):
+        title = field(title, "Evidence title")
+        source = field(source, "Source", 2000)
+        text = searchable_text(raw, format)
+        found = indicators(text)
+        digest = hashlib.sha256(raw).hexdigest()
+        with self.connection() as db:
+            self.require_case(db, case_id)
+            # Serialize deduplication and all subsequent writes as one transaction.
+            db.execute("BEGIN IMMEDIATE")
+            existing = db.execute("SELECT id FROM evidence WHERE case_id=? AND source=? AND sha256=?", (case_id, source, digest)).fetchone()
+            if existing:
+                return {"id": existing["id"], "duplicate": True}
+            evidence_id = uuid.uuid4().hex
+            db.execute("INSERT INTO evidence VALUES (?,?,?,?,?,?,?,?,?)", (evidence_id, case_id, title, source, format, now(), digest, raw, text))
+            for item in found:
+                db.execute("INSERT OR IGNORE INTO entities VALUES (?,?,?,?)", (uuid.uuid4().hex, case_id, item["kind"], item["value"]))
+                entity_id = db.execute("SELECT id FROM entities WHERE case_id=? AND kind=? AND value=?", (case_id, item["kind"], item["value"])).fetchone()[0]
+                db.execute("INSERT OR IGNORE INTO mentions VALUES (?,?,?,?)", (entity_id, evidence_id, item["start"], item["end"]))
+        return {"id": evidence_id, "duplicate": False, "mentions": len(found)}
+
+    def view(self, case_id, query="", kind=""):
+        query = field(query, "Search", 200, required=False)
+        if kind and kind not in KINDS:
+            raise InvalidInput("Unknown indicator type.")
+        # Literal substring matching, including percent and underscore characters.
+        with self.connection() as db:
+            case = self.require_case(db, case_id)
+            entities = [dict(x) for x in db.execute("""SELECT e.*, COUNT(DISTINCT m.evidence_id) AS sources,
+                COUNT(*) AS mentions FROM entities e JOIN mentions m ON e.id=m.entity_id
+                WHERE e.case_id=? AND (?='' OR e.kind=?) AND (?='' OR instr(lower(e.value),lower(?))>0)
+                GROUP BY e.id ORDER BY sources DESC,e.kind,e.value LIMIT 500""", (case_id, kind, kind, query, query))]
+            evidence = [dict(x) for x in db.execute("""SELECT id,title,source,format,collected_at,sha256,length(raw) AS bytes
+                FROM evidence WHERE case_id=? AND (?='' OR instr(lower(text),lower(?))>0
+                OR instr(lower(title),lower(?))>0 OR instr(lower(source),lower(?))>0)
+                ORDER BY collected_at DESC LIMIT 200""", (case_id, query, query, query, query))]
+            counts = dict(db.execute("""SELECT (SELECT count(*) FROM evidence WHERE case_id=?) AS evidence,
+                (SELECT count(*) FROM entities WHERE case_id=?) AS entities,
+                (SELECT count(*) FROM mentions m JOIN evidence e ON e.id=m.evidence_id WHERE e.case_id=?) AS mentions""", (case_id, case_id, case_id)).fetchone())
+        return {"case": case, "entities": entities, "evidence": evidence, "counts": counts, "limits": {"entities": 500, "evidence": 200}}
+
+    def evidence(self, case_id, evidence_id):
+        with self.connection() as db:
+            self.require_case(db, case_id)
+            row = db.execute("SELECT id,title,source,format,collected_at,sha256,text FROM evidence WHERE id=? AND case_id=?", (evidence_id, case_id)).fetchone()
+            if not row:
+                raise InvalidInput("Evidence not found in this case.")
+            result = dict(row)
+            result["mentions"] = [dict(x) for x in db.execute("""SELECT e.kind,e.value,m.start,m.end FROM mentions m
+                JOIN entities e ON e.id=m.entity_id WHERE m.evidence_id=? ORDER BY m.start""", (evidence_id,))]
+            return result
+
+    def entity(self, case_id, entity_id):
+        with self.connection() as db:
+            self.require_case(db, case_id)
+            row = db.execute("SELECT * FROM entities WHERE id=? AND case_id=?", (entity_id, case_id)).fetchone()
+            if not row:
+                raise InvalidInput("Indicator not found in this case.")
+            result = dict(row)
+            result["evidence"] = [dict(x) for x in db.execute("""SELECT DISTINCT e.id,e.title,e.source,e.collected_at
+                FROM mentions m JOIN evidence e ON e.id=m.evidence_id WHERE m.entity_id=? ORDER BY e.collected_at""", (entity_id,))]
+            result["related"] = [dict(x) for x in db.execute("""SELECT e.id,e.kind,e.value,COUNT(DISTINCT other.evidence_id) AS shared_sources
+                FROM (SELECT DISTINCT evidence_id FROM mentions WHERE entity_id=?) own
+                JOIN mentions other ON own.evidence_id=other.evidence_id
+                JOIN entities e ON other.entity_id=e.id WHERE other.entity_id!=?
+                GROUP BY e.id ORDER BY shared_sources DESC,e.value LIMIT 100""", (entity_id, entity_id))]
+        return result
+
+    def export(self, case_id):
+        with self.connection() as db:
+            # One read transaction keeps report tables on the same snapshot.
+            db.execute("BEGIN")
+            case = self.require_case(db, case_id)
+            evidence = []
+            for row in db.execute("SELECT * FROM evidence WHERE case_id=? ORDER BY collected_at", (case_id,)):
+                item = dict(row)
+                item["original_base64"] = base64.b64encode(item.pop("raw")).decode("ascii")
+                evidence.append(item)
+            entities = [dict(x) for x in db.execute("SELECT * FROM entities WHERE case_id=? ORDER BY kind,value", (case_id,))]
+            mentions = [dict(x) for x in db.execute("SELECT m.* FROM mentions m JOIN evidence e ON m.evidence_id=e.id WHERE e.case_id=? ORDER BY m.evidence_id,m.start", (case_id,))]
+        return {"schema_version": 1, "exported_at": now(), "case": case, "evidence": evidence, "entities": entities, "mentions": mentions,
+                "interpretation": "Indicators are extracted mentions. Shared sources do not establish ownership or identity."}
+
+    def markdown(self, case_id):
+        data = self.export(case_id)
+        # Escape user content so a Markdown viewer cannot execute raw HTML or create links/images.
+        def escape(value):
+            return re.sub(r"([\\`*_{}\[\]()#+.!|>~-])", r"\\\1", value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")).replace("\n", " ")
+        lines = ["# " + escape(data["case"]["name"]), "", "Focus: " + data["case"]["focus_type"], "", "Aliases: " + escape(", ".join(data["case"]["aliases"])), "", "Known identifiers (user supplied): " + escape(", ".join(data["case"]["identifiers"])), "", data["interpretation"], "", "## Indicators", ""]
+        for entity in data["entities"]:
+            lines.append(f"- {entity['kind']}: {escape(entity['value'])}")
+        lines.extend(["", "## Evidence", ""])
+        for item in data["evidence"]:
+            lines.extend(["### " + escape(item["title"]), "", "Source: " + escape(item["source"]), "", "Collected: " + item["collected_at"], "", "SHA-256: " + item["sha256"], "", "Evidence ID: " + item["id"], ""])
+        return "\n".join(lines)
+
+    def backup(self, destination):
+        destination = Path(destination)
+        # Exclusive creation prevents overwrite and symlink traversal at the final component.
+        fd = os.open(destination, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(fd)
+        with self.connection() as db:
+            target = sqlite3.connect(destination)
+            try:
+                db.backup(target)
+                if target.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                    raise InvalidInput("Backup integrity check failed.")
+            finally:
+                target.close()
+        return destination

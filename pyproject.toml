@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "oh-no-she-osint"
+version = "0.1.0"
+description = "A private, offline-first OSINT evidence workspace"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = []
+
+[project.scripts]
+osint = "local_osint.__main__:main"
+
+[tool.setuptools.package-data]
+local_osint = ["static/*", "tlds.txt"]

@@ -1,0 +1,7 @@
+FICTIONAL TRAINING EVIDENCE — no real investigation
+
+The public project bulletin names hello@example.org as its contact.
+Project home: https://example.org/research
+A second bulletin mentions hello@example.org and archive.example.org.
+Documentation uses 192.0.2.18 as an example address.
+These mentions do not establish who owns an account, domain, or IP address.
