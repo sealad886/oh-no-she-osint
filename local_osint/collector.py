@@ -8,7 +8,8 @@ import ipaddress
 import socket
 import ssl
 import time
-from urllib.parse import quote, urlencode, urlsplit, urlunsplit
+from html.parser import HTMLParser
+from urllib.parse import parse_qs, quote, urlencode, urljoin, urlsplit, urlunsplit
 
 from .engine import InvalidInput, MAX_BYTES
 
@@ -26,7 +27,8 @@ def public_address(value):
     return True
 
 
-def target(url, allow_query=False):
+def public_url(url, allow_query=False):
+    """Validate URL syntax without contacting the destination."""
     if not isinstance(url, str) or len(url) > 2000 or any(ord(c) < 33 or ord(c) > 126 for c in url) or "\\" in url:
         raise InvalidInput("Enter a plain ASCII public HTTPS URL, up to 2,000 characters.")
     try:
@@ -48,15 +50,23 @@ def target(url, allow_query=False):
         else:
             if not public_address(str(numeric_address)):
                 raise InvalidInput("Private and special-use addresses are blocked.")
+        authority = f"[{host}]" if ":" in host else host
+        canonical = urlunsplit(("https", authority, parsed.path or "/", parsed.query if allow_query else "", ""))
+        request_path = (parsed.path or "/") + (("?" + parsed.query) if allow_query and parsed.query else "")
+        return host, request_path, canonical
+    except (ValueError, OSError) as exc:
+        raise InvalidInput("Could not validate a public HTTPS destination.") from exc
+
+
+def target(url, allow_query=False):
+    host, request_path, canonical = public_url(url, allow_query)
+    try:
         records = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
         addresses = list(dict.fromkeys(record[4][0] for record in records))
         if not addresses or any(not public_address(address) for address in addresses):
             raise InvalidInput("Destination resolves to a private or special-use address.")
-        authority = f"[{host}]" if ":" in host else host
-        canonical = urlunsplit(("https", authority, parsed.path or "/", parsed.query if allow_query else "", ""))
-        request_path = (parsed.path or "/") + (("?" + parsed.query) if allow_query and parsed.query else "")
         return host, addresses[0], request_path, canonical
-    except (ValueError, OSError) as exc:
+    except OSError as exc:
         raise InvalidInput("Could not validate a public HTTPS destination.") from exc
 
 
@@ -86,26 +96,57 @@ def generated_title(value):
     return value if len(value) <= 200 else value[:197] + "..."
 
 
-def collect(engine, case_id, url, enabled=False):
+def collect(engine, case_id, url, enabled=False, allow_query=False):
     if not enabled:
         raise InvalidInput("Web collection is off. Restart with --allow-network to enable it.")
     # Validate case before DNS or outbound requests.
     with engine.connection() as db:
         engine.require_case(db, case_id)
-    raw, format, canonical = fetch_public(url)
+    raw, format, canonical = fetch_public(url, allow_query=allow_query)
     return engine.ingest(case_id, raw, generated_title(canonical), canonical, format)
 
 
 def fetch_public(url, allow_query=False):
-    host, address, path, canonical = target(url, allow_query=allow_query)
-    connection = PinnedHTTPS(host, address)
+    """Fetch a bounded public response, revalidating and pinning every redirect."""
+    deadline = time.monotonic() + 20
+    visited = set()
+    current = url
+    for hop in range(4):
+        if time.monotonic() >= deadline:
+            raise InvalidInput("Collection timed out.")
+        host, address, path, canonical = target(current, allow_query=allow_query)
+        if canonical in visited:
+            raise InvalidInput("Destination returned a redirect loop.")
+        visited.add(canonical)
+        connection = PinnedHTTPS(host, address)
+        connection.timeout = min(10, max(0.001, deadline - time.monotonic()))
+        try:
+            connection.request("GET", path, headers={"User-Agent": "LocalOSINT/0.1 (public evidence collection)", "Accept": "text/html, text/plain, application/json, text/csv", "Accept-Encoding": "identity"})
+            response = connection.getresponse()
+            if response.status in {301, 302, 303, 307, 308}:
+                location = response.getheader("Location")
+                if not location:
+                    raise InvalidInput("Destination returned a redirect without a location.")
+                if hop == 3:
+                    raise InvalidInput("Destination exceeded the three-redirect limit.")
+                if len(location) > 2000 or any(ord(c) < 33 or ord(c) > 126 for c in location) or "\\" in location:
+                    raise InvalidInput("Destination returned an invalid redirect URL.")
+                current = urljoin(canonical, location)
+                continue
+            return read_public_response(response, connection, canonical, deadline)
+        except (OSError, http.client.HTTPException) as exc:
+            # Do not echo URLs, cookies, TLS internals, or server-controlled error data.
+            raise InvalidInput("HTTPS collection failed. Check connectivity and the site's certificate.") from exc
+        finally:
+            connection.close()
+
+
+def read_public_response(response, connection, canonical, deadline):
     try:
-        connection.request("GET", path, headers={"User-Agent": "LocalOSINT/0.1 (single-page public evidence collection)", "Accept": "text/html, text/plain, application/json, text/csv", "Accept-Encoding": "identity"})
-        response = connection.getresponse()
         if response.status == 429:
             raise InvalidInput('Source rate limited this request (HTTP 429). Try a later investigation.')
         if response.status != 200:
-            raise InvalidInput(f"Destination returned HTTP {response.status}. Redirects are not followed.")
+            raise InvalidInput(f"Destination returned HTTP {response.status}.")
         if response.getheader("Content-Encoding", "identity").lower() != "identity":
             raise InvalidInput("Compressed responses are unsupported.")
         mime = response.getheader("Content-Type", "").split(";", 1)[0].strip().lower()
@@ -115,7 +156,6 @@ def fetch_public(url, allow_query=False):
         length = response.getheader("Content-Length")
         if length and (not length.isdecimal() or int(length) > MAX_BYTES):
             raise InvalidInput("Response exceeds the 2 MiB evidence limit.")
-        deadline = time.monotonic() + 20
         chunks, size = [], 0
         while True:
             remaining = deadline - time.monotonic()
@@ -134,8 +174,120 @@ def fetch_public(url, allow_query=False):
     except (OSError, http.client.HTTPException) as exc:
         # Do not echo URLs, cookies, TLS internals, or server-controlled error data.
         raise InvalidInput("HTTPS collection failed. Check connectivity and the site's certificate.") from exc
-    finally:
-        connection.close()
+
+
+class SearchHTML(HTMLParser):
+    """Read organic links and snippets from DuckDuckGo's non-JavaScript pages."""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.results = []
+        self.capture = None
+        self.depth = 0
+        self.parts = []
+        self.size = 0
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        classes = set(attrs.get("class", "").split())
+        if self.capture:
+            if tag not in {"br", "hr", "img", "input", "meta", "link", "wbr"}:
+                self.depth += 1
+            return
+        if tag == "a" and classes & {"result__a", "result-link"} and len(self.results) < 30:
+            self.results.append({"title": "", "url": attrs.get("href", ""), "snippet": ""})
+            self.capture = "title"
+        elif classes & {"result__snippet", "result-snippet"} and self.results:
+            self.capture = "snippet"
+        if self.capture:
+            self.depth, self.parts, self.size = 1, [], 0
+
+    def handle_endtag(self, tag):
+        if not self.capture:
+            return
+        self.depth -= 1
+        if self.depth <= 0:
+            self.results[-1][self.capture] = " ".join("".join(self.parts).split())[:1000 if self.capture == "snippet" else 300]
+            self.capture = None
+
+    def handle_data(self, data):
+        if self.capture and self.size < 2000:
+            part = data[:2000 - self.size]
+            self.parts.append(part)
+            self.size += len(part)
+
+
+def search_result_url(value):
+    """Decode a search redirect locally; never request the search wrapper."""
+    if not isinstance(value, str) or len(value) > 8000:
+        return None
+    try:
+        wrapper = urlsplit(urljoin("https://lite.duckduckgo.com/", value))
+        if wrapper.hostname in {"duckduckgo.com", "html.duckduckgo.com", "lite.duckduckgo.com"}:
+            if wrapper.path != "/l/":
+                return None
+            values = parse_qs(wrapper.query, max_num_fields=12).get("uddg", [])
+            if len(values) != 1:
+                return None
+            value = values[0]
+        elif value.startswith("//"):
+            value = wrapper.geturl()
+        # Fragments select in-page content and never reach the server.
+        value = value.split("#", 1)[0]
+        value = quote(value, safe=":/?=&;%+@!$'()*,-._~[]")
+        host, _, canonical = public_url(value, allow_query=True)
+        if host == "duckduckgo.com" or host.endswith(".duckduckgo.com"):
+            return None
+        return canonical
+    except (InvalidInput, ValueError):
+        return None
+
+
+def parse_search(raw):
+    if len(raw) > MAX_BYTES:
+        raise InvalidInput("Search response exceeds the 2 MiB evidence limit.")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise InvalidInput("Search source did not return UTF-8 HTML.") from exc
+    lower = text.lower()
+    if any(marker in lower for marker in ("anomaly.js", "anomaly-modal", "challenge-form")):
+        raise InvalidInput("Search provider requires a human check. Open DuckDuckGo in your browser or retry later; no challenge bypass is attempted.")
+    parser = SearchHTML()
+    parser.feed(text)
+    parser.close()
+    results, seen = [], set()
+    for result in parser.results:
+        url = search_result_url(result["url"])
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        results.append({**result, "url": url})
+        if len(results) == 10:
+            break
+    if not results and not any(marker in lower for marker in ("no-results", "no results found", "no more results")):
+        raise InvalidInput("Search response could not be interpreted. The provider may have changed its page or blocked this request.")
+    return results
+
+
+def web_search(engine, case_id, query, enabled=False):
+    """No-key public web search; preserve the original search page as evidence."""
+    if not enabled:
+        raise InvalidInput("Collection is off. Restart with --allow-network to enable it.")
+    with engine.connection() as db:
+        engine.require_case(db, case_id)
+    from .engine import field
+    query = field(query, "Web search query", 200)
+    url = "https://lite.duckduckgo.com/lite/?" + urlencode({"q": query})
+    raw, format, canonical = fetch_public(url, allow_query=True)
+    if format != "html":
+        raise InvalidInput("Search source did not return HTML.")
+    saved = engine.ingest(case_id, raw, generated_title("Web search: " + query), canonical, "html")
+    try:
+        results = parse_search(raw)
+    except InvalidInput as exc:
+        exc.evidence_id = saved["id"]
+        raise
+    return {"query": query, "results": results, **saved}
 
 
 SIGNALS = {"dns", "registration", "certificate", "website"}

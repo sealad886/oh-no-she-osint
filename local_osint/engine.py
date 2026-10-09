@@ -374,6 +374,35 @@ class Engine:
         report = data['investigation']
         if report:
             lines.extend(['## Investigation dossier', '', 'Status: ' + escape(report['status']), '', escape(report['interpretation']), ''])
+            if report.get('stop_reason'):
+                lines.extend(['Why it stopped: ' + escape(report['stop_reason']), ''])
+            if report.get('budget'):
+                budget = report['budget']
+                lines.extend(['Request usage: ' + str(budget['used']) + ' of ' + str(budget['limit']) + ' request units. The ceiling is a limit, not a completion target.', ''])
+            if report.get('web_results'):
+                lines.extend(['### Public web search leads - identity unconfirmed', ''])
+                for result in report['web_results']:
+                    lines.extend(['- ' + escape(result['title']), '  URL: ' + escape(result['url'])])
+                    if result.get('snippet'):
+                        lines.append('  Search snippet: ' + escape(result['snippet']))
+                    if result.get('reason'):
+                        lines.append('  Follow-up decision: ' + escape(result['reason']))
+                    if result.get('source_id'):
+                        lines.append('  Search evidence ID: ' + escape(result['source_id']))
+                    if result.get('page_source_id'):
+                        lines.append('  Collected page evidence ID: ' + escape(result['page_source_id']))
+                    lines.append('')
+            if report.get('pages'):
+                lines.extend(['### Collected public pages', ''])
+                for page in report['pages']:
+                    lines.extend(['- Requested URL: ' + escape(page['url']),
+                                  '  Final URL: ' + escape(page.get('final_url', page['url'])),
+                                  '  Evidence ID: ' + escape(page['source_id'])])
+                    if page.get('excerpt'):
+                        lines.append('  Source excerpt: ' + escape(page['excerpt']))
+                    for link in page.get('links', []):
+                        lines.append('  Discovered follow-up: ' + escape(link.get('title', '')) + '; URL: ' + escape(link['url']))
+                    lines.append('')
             for profile in report['profiles']:
                 lines.extend(['### Unconfirmed candidate: ' + escape(profile['label']), '', escape(profile['description']), '', 'Candidate ID: ' + escape(profile['candidate_id']), '', 'Evidence ID: ' + escape(profile['source_id']), ''])
                 for claim in profile['claims']:
@@ -394,7 +423,26 @@ class Engine:
                     lines.extend(['Incomplete: AI draft reached its output limit.', ''])
             lines.extend(['### Collection log', ''])
             for step in report['steps']:
-                lines.append('- ' + ('Collected: ' if step['ok'] else 'Unavailable: ') + escape(step['label']) + ('; ' + escape(step['error']) if step.get('error') else ''))
+                status = step.get('status') or ('success' if step['ok'] else 'failed')
+                lines.append('- ' + escape(step['label']) + '; status: ' + escape(status))
+                if step.get('tool'):
+                    lines.append('  Tool: ' + escape(step['tool']))
+                origin = {'ai': 'Local AI', 'user': 'You', 'engine': 'Automatic investigation'}.get(step.get('origin'), step.get('origin'))
+                if origin:
+                    lines.append('  Requested by: ' + escape(origin))
+                for key, value in step.get('arguments', {}).items():
+                    rendered = json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value)
+                    lines.append('  Input ' + escape(key) + ': ' + escape(rendered))
+                if step.get('result_summary'):
+                    lines.append('  Result: ' + escape(step['result_summary']))
+                if step.get('error'):
+                    lines.append('  Error: ' + escape(step['error']))
+                if step.get('source_id'):
+                    lines.append('  Evidence ID: ' + escape(step['source_id']))
+                if step.get('started_at'):
+                    lines.append('  Started: ' + escape(step['started_at']))
+                if step.get('duration_ms') is not None:
+                    lines.append('  Duration: ' + str(step['duration_ms']) + ' ms')
             lines.append('')
         lines.extend(['## Indicators', ''])
         for entity in data["entities"]:

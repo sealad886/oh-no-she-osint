@@ -105,8 +105,40 @@ class LocalAITests(unittest.TestCase):
             self.assertFalse(payload["parallel_tool_calls"])
             self.assertEqual(payload["tool_choice"], "required")
 
+    def test_local_input_refusal_keeps_actionable_error_without_server_body(self):
+        self.ai._port, self.ai._key = 12345, 'secret'
+        with patch('local_osint.ai.http.client.HTTPConnection') as connection:
+            response = self.response({'error': 'private server details'}, status=400)
+            connection.return_value.getresponse.return_value = response
+            with self.assertRaisesRegex(InvalidInput, 'context may be full') as caught:
+                self.ai._request('POST', '/v1/chat/completions', {})
+            self.assertNotIn('private server details', str(caught.exception))
+
+
 
 class ToolLoopTests(unittest.TestCase):
+    def test_required_follow_chooses_untried_leads_instead_of_repeating_failed_pages(self):
+        report = {'subject': 'Ordinary Person', 'options': {'tools': ['web_search'], 'page_limit': 2},
+                  'steps': [{'label': 'Blocked profile', 'tool': 'collect_page', 'arguments': {'url': 'https://example.org/blocked'}, 'status': 'failed'}],
+                  'web_results': [{'url': 'https://example.org/blocked', 'relevant': True},
+                                  {'url': 'https://example.org/public', 'relevant': True}]}
+        ai = Mock()
+        ai.chat.side_effect = [{'tool_calls': [self.request('web_search', {'query': '"Ordinary Person"'})]},
+                               {'content': 'Unavailable'}]
+        run_assistant(ai, report, Mock(return_value={'results': []}))
+        schema = ai.chat.call_args.args[1][0]['function']['parameters']['properties']['url']
+        self.assertEqual(schema['enum'], ['https://example.org/public'])
+
+    def test_long_public_history_leaves_room_for_tools_in_local_context(self):
+        ai, dispatch = Mock(), Mock(return_value={'text': 'Evidence' * 2000})
+        ai.chat.side_effect = [{'tool_calls': [self.request('read_evidence', {'id': 'a' * 32})]}, {'content': 'Draft'}]
+        run_assistant(ai, {'subject': 'Ordinary Person', 'source_ids': ['a' * 32], 'options': {},
+                          'pages': [{'excerpt': 'Public facts ' * 2000, 'links': []}], 'web_results': []}, dispatch)
+        messages = ai.chat.call_args.args[0]
+        self.assertIn('a' * 32, messages[1]['content'])
+        self.assertLess(len(messages[1]['content']), 8500)
+        self.assertLessEqual(len(next(x['content'] for x in messages if x['role'] == 'tool')), 1200)
+
     def request(self, name, arguments=None):
         return {"id": "request_1", "type": "function", "function": {"name": name, "arguments": json.dumps(arguments or {})}}
 
@@ -186,3 +218,97 @@ class ToolLoopTests(unittest.TestCase):
         ai.chat.return_value = {"content": "Sources [" + "a" * 32 + ", " + "b" * 32 + ", " + "c" * 32 + "]; repeated [" + "a" * 32 + "]"}
         result = run_assistant(ai, {"source_ids": ["a" * 32, "b" * 32]}, Mock())
         self.assertEqual(result["source_ids"], ["a" * 32, "b" * 32])
+
+    def test_web_investigation_requires_real_search_follow_and_evidence_read(self):
+        report = {'subject': 'Eric Mulhall', 'source_ids': ['a' * 32], 'options': {'tools': ['web_search'], 'page_limit': 4}, 'web_results': [], 'steps': []}
+        def dispatch(name, args):
+            if name == 'web_search':
+                report['web_results'].append({'title': 'Eric Mulhall profile', 'url': 'https://example.org/eric', 'relevant': True})
+                return {'results': report['web_results']}
+            if name == 'collect_page':
+                report['web_results'][0]['page_source_id'] = 'a' * 32
+            return {'id': 'a' * 32, 'text': 'Eric Mulhall public profile'}
+        ai = Mock()
+        ai.chat.side_effect = [
+            {'tool_calls': [self.request('web_search', {'query': '"Eric Mulhall" profile'})]},
+            {'tool_calls': [self.request('collect_page', {'url': 'https://example.org/eric'})]},
+            {'tool_calls': [self.request('read_evidence', {'id': 'a' * 32})]},
+            {'content': 'Unconfirmed public profile [' + 'a' * 32 + ']', 'finish_reason': 'stop'}]
+        result = run_assistant(ai, report, dispatch)
+        self.assertEqual(result['status'], 'draft')
+        self.assertEqual([call['tool'] for call in result['tool_calls']], ['web_search', 'collect_page', 'read_evidence'])
+        self.assertTrue(all(t['ok'] for t in result['tool_calls']))
+        self.assertEqual([c.kwargs['tool_choice'] for c in ai.chat.call_args_list[:3]], ['required'] * 3)
+        follow_schema = ai.chat.call_args_list[1].args[1][0]['function']['parameters']['properties']['url']
+        read_schema = ai.chat.call_args_list[2].args[1][0]['function']['parameters']['properties']['id']
+        self.assertEqual(follow_schema['enum'], ['https://example.org/eric'])
+        self.assertEqual(read_schema['enum'], ['a' * 32])
+        for item in TOOLS:
+            self.assertTrue(all('enum' not in prop for prop in item['function']['parameters']['properties'].values()))
+
+    def test_model_cannot_claim_success_when_required_tool_is_skipped(self):
+        ai = Mock()
+        ai.chat.return_value = {'content': 'Unverified guess', 'finish_reason': 'stop'}
+        result = run_assistant(ai, {'subject': 'Eric Mulhall', 'options': {'tools': ['web_search']}}, Mock())
+        self.assertEqual(result['status'], 'failed')
+        self.assertIn('required', result['warning'])
+
+    def test_no_follow_path_still_requires_successful_evidence_read(self):
+        for search_result in [{'results': []}, {'error': 'Provider unavailable'}]:
+            with self.subTest(search_result=search_result):
+                report = {'subject': 'Eric Mulhall', 'source_ids': ['a' * 32], 'run_id': 'run',
+                          'options': {'tools': ['web_search'], 'page_limit': 1},
+                          'pages': [{'run_id': 'run'}],
+                          'web_results': [{'relevant': True, 'page_source_id': 'a' * 32}]}
+                ai, dispatch = Mock(), Mock(side_effect=[search_result, {'id': 'a' * 32, 'text': 'Source'}])
+                ai.chat.side_effect = [
+                    {'tool_calls': [self.request('web_search', {'query': '"Eric Mulhall"'})]},
+                    {'tool_calls': [self.request('read_evidence', {'id': 'a' * 32})]},
+                    {'content': 'Observation [' + 'a' * 32 + ']'}]
+                result = run_assistant(ai, report, dispatch)
+                self.assertEqual(ai.chat.call_args_list[1].args[1][0]['function']['name'], 'read_evidence')
+                self.assertEqual(result['status'], 'failed' if search_result.get('error') else 'draft')
+                self.assertEqual([t['tool'] for t in result['tool_calls']], ['web_search', 'read_evidence'])
+
+    def test_failed_read_cannot_be_followed_by_successful_draft(self):
+        ai, dispatch = Mock(), Mock(return_value={'error': 'Unavailable evidence'})
+        ai.chat.side_effect = [{'tool_calls': [self.request('read_evidence', {'id': 'a' * 32})]},
+                               {'content': 'Unsupported draft'}]
+        result = run_assistant(ai, {'source_ids': ['a' * 32]}, dispatch)
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(ai.chat.call_args.kwargs['tool_choice'], 'required')
+
+    def test_valid_blocked_arguments_and_policy_error_are_preserved(self):
+        ai, dispatch = Mock(), Mock(side_effect=InvalidInput('Use approved public context.'))
+        ai.chat.side_effect = [{'tool_calls': [self.request('web_search', {'query': '"Eric Mulhall" hospital'})]},
+                               {'content': 'Unavailable'}]
+        result = run_assistant(ai, {'subject': 'Eric Mulhall', 'options': {'tools': ['web_search']}}, dispatch)
+        self.assertEqual(result['tool_calls'][0]['arguments'], {'query': '"Eric Mulhall" hospital'})
+        self.assertIn('approved public context', result['tool_calls'][0]['result'])
+        self.assertEqual(result['status'], 'failed')
+
+    def test_first_real_search_uses_configured_public_query_without_identity_guessing(self):
+        ai = Mock()
+        ai.chat.return_value = {'content': 'Unavailable'}
+        run_assistant(ai, {'subject': 'Ordinary Person', 'options': {
+            'tools': ['web_search'], 'query': '"Ordinary Person" profile', 'context': 'public employer'}}, Mock())
+        query_schema = ai.chat.call_args.args[1][0]['function']['parameters']['properties']['query']
+        self.assertEqual(query_schema['enum'], ['"Ordinary Person" profile public employer'])
+        self.assertNotIn('enum', TOOLS[0]['function']['parameters']['properties']['query'])
+
+    def test_first_ai_search_keeps_custom_query_and_adds_subject_scope(self):
+        from local_osint.investigation import Investigation
+        with tempfile.TemporaryDirectory(dir=Path(tempfile.gettempdir()).resolve()) as folder:
+            engine = Engine(Path(folder) / 'private')
+            case = engine.create_case('Ordinary Person', 'person')
+            runner = Investigation(engine, case['id'], True, options={'query': 'public employer', 'tools': ['web_search']})
+            ai = Mock()
+            ai.chat.return_value = {'content': 'Unavailable'}
+            run_assistant(ai, runner.report, Mock())
+            query = ai.chat.call_args.args[1][0]['function']['parameters']['properties']['query']['enum'][0]
+            self.assertEqual(runner.model_query(query), '"Ordinary Person" public employer')
+            alias_case = engine.create_case('Canonical Person', 'person', aliases=['Public Alias'])
+            alias_runner = Investigation(engine, alias_case['id'], True, options={'query': '"Public Alias" profile', 'tools': ['web_search']})
+            run_assistant(ai, alias_runner.report, Mock())
+            query = ai.chat.call_args.args[1][0]['function']['parameters']['properties']['query']['enum'][0]
+            self.assertEqual(alias_runner.model_query(query), '"Public Alias" profile')

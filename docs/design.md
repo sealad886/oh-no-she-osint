@@ -156,3 +156,72 @@ session authentication. See validation evidence for the observed default-port
 collision and repaired canonical startup; the original 42-test snapshot above is
 historical, and the automatic-investigation correction brings the current suite to
 73 tests.
+
+## General web search and tool control
+
+Current user-observed failure: Eric Mulhall's run spent 9 of its 24-unit ceiling,
+then exhausted an encyclopedia-first plan. It collected an unrelated article,
+treated an email provider as a subject domain, encountered news rate limiting and
+failed local inference. The ceiling was displayed without explaining completion;
+tools lacked visible inputs and individual retries.
+
+Accepted change: ordinary people must be discoverable through real web search.
+Local AI can search and follow relevant public leads. Users can inspect current
+and completed tools, edit queries/context and source selection, and retry one tool
+without repeating the full investigation. Original evidence and prior reports stay
+immutable. A run explains why it ended below its budget.
+
+Design extends the canonical collector, Investigation/Jobs, local AI dispatcher
+and browser UI. DuckDuckGo Lite supplies no-key public search through pinned
+HTTPS; a live subject-name probe succeeded. HTML returned HTTP 202, so Lite is the
+default. SearXNG JSON was considered, but requiring another service or relying on
+unverified public instances does not meet current ease-of-use acceptance. Search
+results retain raw evidence. Challenges and rate limits remain visible failures.
+Relevant name/context matches rank before follow-up; unrelated encyclopedia hits
+and email-provider domains are not followed automatically. Bounded HTTPS redirects
+revalidate and pin every destination; discovered query URLs are explicitly allowed.
+
+Options expose public query/context, selected sources, page limit and request
+ceiling. Activity records tool, inputs, owner, status, timing, output/source IDs and
+error before and after execution. Retry is one reserved asynchronous job and keeps
+previous evidence. Model searches require subject terms and bounded public context;
+the model cannot search arbitrary private notes or other cases. Follow-up URLs must
+come from this run's search results or collected page links. Users can explicitly
+run a new public URL/query through the same guarded collector.
+
+Acceptance: non-encyclopedic search returns relevant public leads and collects
+pages; AI makes real search/follow calls; unrelated matches and mailbox domains are
+skipped; budget/deadline/stop reasons are explicit; each source/tool is editable and
+retryable; offline, case isolation, redirect pinning, concurrency and original-byte
+provenance remain enforced. Prove these through behavioral tests, the actual Eric
+case (public name only), browser operation and native-model validation separately.
+
+Route remains medium-feature-change, medium scale, high risk, change authority.
+Reuse required context, acceptance, design, planning, implementation, quality,
+documentation, review and local release-disposition owners. Security is activated
+for model queries, returned URLs and per-tool execution; coordination is not
+applicable because no external tracker or publication is requested. Retrospective
+is activated by the observed relevance/visibility failure. No schema migration is
+needed: additive run records are generated evidence, not mutable case data.
+Rollback is the focused source change with preserved local evidence.
+
+Ordered work: (1) public search/guarded transport and UI contracts; (2) shared
+tool execution, relevance, bounded AI and retry integration; (3) behavioral/live
+verification and independent review; (4) final docs and focused local commit.
+One active step at a time; bounded collector/UI writers work independently while
+the primary integrates the canonical run owner. No worktree or publication.
+
+Implementation, behavioral/live verification and independent review are complete
+for this correction. Final review passed 111 tests against the recorded frozen
+snapshot. Cached page/domain calls preserve visible outcomes and original errors;
+AI follow-up selects untried leads. Original reports/evidence remain immutable.
+The final handoff includes user/operator documentation and a focused local
+Conventional Commit; external publication and release remain unauthorized.
+
+Retrospective: an encyclopedia response and a progress counter did not prove
+ordinary-person OSINT. Acceptance now requires actual public-web discovery,
+relevant collection, visible inputs/results, individual edited retry, explicit
+stop reasons and, when enabled, native local-model search/follow/read/drafting.
+Provider blocking and namesake uncertainty remain evidence limits, not hidden
+successes. See the current validation record for separate synthetic, provider,
+browser and model receipts.

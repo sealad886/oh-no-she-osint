@@ -120,7 +120,7 @@ class ServerTests(unittest.TestCase):
             return b'{"articles":[]}', 'json', url
         with patch('local_osint.collector.fetch_public', side_effect=public):
             self.assertEqual(self.request('/api/investigate', {'case': case['id']}, authenticated=False)[0], 401)
-            response = self.request('/api/investigate', {'case': case['id']})
+            response = self.request('/api/investigate', {'case': case['id'], 'options': {'tools': ['wikipedia', 'wikidata', 'news']}})
             self.assertEqual(response[0], 202)
             for _ in range(100):
                 report = self.request('/api/investigation?case=' + case['id'])[2]
@@ -141,6 +141,55 @@ class ServerTests(unittest.TestCase):
             start.assert_called_once_with()
         case = self.engine.create_case('Sample')
         self.assertEqual(self.request('/api/investigate', {'case': case['id'], 'ai': True})[0], 400)
+
+    def test_tool_retry_has_authentication_single_job_and_retained_history(self):
+        self.server.jobs.enabled = True
+        case = self.engine.create_case('Eric Mulhall', 'person')
+        html = b'<a class="result-link" href="https://example.org/eric">Eric Mulhall profile</a><td class="result-snippet">Public profile</td>'
+        def wait():
+            for _ in range(100):
+                report = self.request('/api/investigation?case=' + case['id'])[2]
+                if report and report['status'] != 'running':
+                    return report
+                time.sleep(.01)
+            self.fail('Tool did not finish')
+        with patch('local_osint.collector.fetch_public', return_value=(html, 'html', 'https://lite.duckduckgo.com/lite/?q=Eric')) as fetch:
+            payload = {'case': case['id'], 'tool': 'web_search', 'arguments': {'query': '"Eric Mulhall"'}}
+            self.assertEqual(self.request('/api/tool', payload, authenticated=False)[0], 401)
+            self.assertEqual(self.request('/api/tool', payload)[0], 202)
+            first = wait()
+            payload['arguments']['query'] = '"Eric Mulhall" Dublin'
+            self.assertEqual(self.request('/api/tool', payload)[0], 202)
+            second = wait()
+        self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(second['parent_run_id'], first['run_id'])
+        self.assertEqual(second['options']['query'], '"Eric Mulhall" Dublin')
+        self.assertEqual(len(second['steps']), 2)
+        self.assertEqual(second['budget']['used'], 1)
+        self.assertEqual(self.request('/api/tool', {'case': case['id'], 'tool': 'shell', 'arguments': {}})[0], 400)
+
+    def test_offline_tool_reads_are_local_and_other_case_reads_fail(self):
+        case = self.engine.create_case('Local')
+        other = self.engine.create_case('Other')
+        saved = self.engine.ingest(case['id'], b'Saved offline evidence', 'Offline')
+        with patch('local_osint.collector.fetch_public') as fetch:
+            self.assertEqual(self.request('/api/tool', {'case': case['id'], 'tool': 'web_search', 'arguments': {'query': 'Local'}})[0], 400)
+            self.assertEqual(self.request('/api/tool', {'case': case['id'], 'tool': 'read_evidence', 'arguments': {'id': saved['id']}})[0], 202)
+            for _ in range(100):
+                report = self.request('/api/investigation?case=' + case['id'])[2]
+                if report['status'] != 'running':
+                    break
+                time.sleep(.01)
+            self.assertEqual(report['status'], 'complete')
+            self.assertEqual(report['budget']['used'], 0)
+            self.assertEqual(self.request('/api/tool', {'case': other['id'], 'tool': 'read_evidence', 'arguments': {'id': saved['id']}})[0], 202)
+            for _ in range(100):
+                report = self.request('/api/investigation?case=' + other['id'])[2]
+                if report['status'] != 'running':
+                    break
+                time.sleep(.01)
+            self.assertEqual(report['status'], 'failed')
+            fetch.assert_not_called()
 
 
 if __name__ == '__main__':

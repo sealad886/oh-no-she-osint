@@ -87,9 +87,10 @@ Graphify AST refresh completed: 222 nodes, 470 edges, 13 communities.
 
 ## Limits and release disposition
 
-The app is a local single-user evidence engine. Automatic collection covers
-Wikipedia/Wikidata, recent GDELT news and public domain signals; subjects absent
-from those sources may need aliases or known public URLs. Co-occurrence and candidate matches
+The app is a local single-user evidence engine. The original automatic collector
+covered Wikipedia/Wikidata, recent GDELT news and public domain signals. The general
+web-search correction below adds indexed public websites for ordinary subjects.
+Sparse results may need public context, aliases or known public URLs. Co-occurrence and candidate matches
 never establish identity, ownership or truth. Security assumptions and residual
 risks are documented in [SECURITY.md](../SECURITY.md).
 
@@ -218,3 +219,97 @@ Independent launcher-fix review returned clean against base `35de2f3` and snapsh
 The reviewer independently reran all 46 tests in 6.103 seconds. This replaces the
 original launcher acceptance gap; the earlier full-engine review remains historical
 evidence for its separately frozen snapshot. No publication or remote CI occurred.
+
+## General web search and tool control, 2026-10-10
+
+The actual Eric Mulhall case exposed the original collector's relevance and
+operator-control failures. Its old run stopped at 9 units because the selected
+encyclopedia/news/domain plan was exhausted, not because it reached its 24-unit
+ceiling or deadline. Wikipedia returned unrelated name fragments; an unrelated
+article was collected, a mailbox provider was treated as a subject domain, news
+returned HTTP 429, and local inference failed. A ceiling alone gave the user no
+explanation of completion, tool inputs or individual recovery.
+
+The canonical collector now uses DuckDuckGo Lite for no-key real web search,
+retains original responses, and follows full-name/alias matches with bounded,
+revalidated HTTPS redirects. Failed pages consume collection units but do not
+fill the successful-page goal. Unrelated encyclopedia hits and email-provider
+domains are skipped automatically. Queries use the public name and user-selected
+public context; the case's stored private contact identifiers were not transmitted.
+Namesakes remain unconfirmed rather than being merged into one identity.
+
+In the actual browser, the Eric case collected four public pages in 11 collection
+units, with seven successful tool calls. The engine continued after LinkedIn HTTP
+999 and a Harvard HTTP 403; GDELT HTTP 429 remained visible. Public profile shells
+and pages mentioning other namesakes are discovery evidence, not identity proof
+or a guarantee of useful content. The browser also ran an individually edited
+`"Eric Mulhall" profile` search: one tool, one unit, prior history and sources
+preserved. Query/context, source selection, page goal and request ceiling are
+editable. Activity displays engine, AI and human calls, their inputs, timing,
+results/errors, source references and individual edit/retry controls.
+
+Behavioral tests cover real-search parsing and challenge detection, redirect
+pinning and failure, full-name relevance, successful-page budgeting, offline
+rejection before DNS, model query/URL/evidence permissions, case isolation,
+single-job reservation, editable single-tool retries, retained partial history,
+required successful AI evidence reads, actionable inference failures and safe
+Markdown export. Cached page/domain reuse also retains its requester, failure
+details and successful sources without new network requests or collection units;
+required AI follow-up prefers untried leads over pages already failed in the run.
+Existing authenticated local HTTP and launcher tests remain part of the suite.
+Independent final validation passed **111 tests in 6.662 seconds**.
+Python compilation, JavaScript syntax, launcher shell syntax and diff whitespace
+checks passed. Graphify AST refresh completed: 454 nodes, 1,127 edges, 16 communities.
+
+Independent review used nine bounded snapshots. Corrections addressed premature
+AI drafts without successful reads, invisible policy-rejected inputs, initial
+query scoping and aliases, model selection of available URLs/evidence IDs, retained
+tool history after timeouts, context pressure/actionable error reporting, and visible
+cached page/domain outcomes. Round 8 identified a false-success domain-cache
+sibling; round 9 independently verified all-failed and mixed-result correction.
+Round 9 returned no actionable P1/P2 finding within scope against frozen snapshot
+`5000ca70b89bb9f084a6cb0ab6a87a5552d32f752cd1820494fd091245966b1d`.
+The identity hashes sorted tracked/nonignored-untracked path + NUL + contents +
+NUL. Source and tests remained unchanged after review; these final documentation
+receipts were appended afterward. Review is bounded source and synthetic evidence,
+not exhaustive security certification or native-model acceptance.
+
+Native validation used the existing cached REDCELL I-Compact GGUF with installed
+llama.cpp 0.6.0, build 11429 (`d81235049`), launched and owned by this app. No model
+download or package installation occurred. Earlier attempts proved actual model
+`web_search`, `collect_page` and `read_evidence` calls, but later inference timed
+out or failed; those attempts are not counted as completed drafts. Tool activity
+preserves successful calls and exposes incomplete analysis for retry. Model inputs
+now use smaller public-evidence projections and bounded available choices while
+original sources and exports remain intact. Character limits reduce context
+pressure without guaranteeing capacity for every model/tokenizer.
+
+The final web-only native Eric run completed in 99.061 seconds: six successful
+tool calls, six of 24 collection units, two collected pages, and successful model
+`web_search`, `collect_page` and `read_evidence` calls. AI followed the untried
+public Patapoutian Lab people page and discovered two follow-up links. The final
+analysis had `status=draft`, `finish_reason=stop`, two citation IDs belonging to
+the run, and explicit namesake uncertainty. The overall run correctly remained
+partial because LinkedIn blocked two automatic page attempts with HTTP 999.
+This verifies native tool use and completed drafting, not factual correctness or
+identity confirmation. Domain failure normalization was verified separately with
+all-failed/mixed behavioral cases; domain tools were disabled in this native run.
+
+Browser validation also verified editable individual search retry, preserved
+history, visible current/completed AI calls and explicit stop reasons. The final
+activity screenshot omits the private case identifiers. No browser console
+warnings/errors were observed in the final check. Markdown/JSON behavior is
+covered by current export tests and the earlier actual export workflow; another
+browser download was not required for this correction.
+
+Search challenges, provider blocking/rate limits, sparse results and model latency
+remain visible limitations. Login/CAPTCHA bypass, people-search brokers and private
+contact searching were not added. Other GGUF families, Windows and additional
+Python versions remain unvalidated. No schema/data migration or dependency change
+was needed. Existing case data, raw evidence and unrelated model processes were
+preserved. No remote, PR, remote CI, publication or release was created.
+
+Retrospective outcome: public-web collection, native tool use and operator recovery
+are separate acceptance claims. Future changes must exercise an ordinary subject,
+inspect actual tool inputs/failures, and prove a single edited retry, rather than
+treating an encyclopedia hit, server launch or progress counter as product acceptance.

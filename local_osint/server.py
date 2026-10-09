@@ -202,7 +202,10 @@ class Handler(BaseHTTPRequestHandler):
                 if path == "/api/cases":
                     self.reply(201, engine.create_case(data.get("name"), data.get("focus_type", "topic"), data.get("aliases"), data.get("identifiers")))
                 elif path == "/api/investigate":
-                    self.reply(202, self.server.jobs.start(data.get('case'), data.get('ai', False)))
+                    self.reply(202, self.server.jobs.start(data.get('case'), data.get('ai', False), data.get('options')))
+                elif path == '/api/tool':
+                    self.reply(202, self.server.jobs.start(data.get('case'), data.get('ai', False),
+                        action={'tool': data.get('tool'), 'arguments': data.get('arguments', {})}))
                 elif path == "/api/stop":
                     self.reply(200, self.server.jobs.stop(data.get('case'), data.get('run_id')))
                 elif path == "/api/ai/start":

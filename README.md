@@ -41,33 +41,57 @@ To disable external collection, including DNS:
 1. Click **Start your first investigation** or **New case**. Choose a person,
    organization, domain or topic, and enter its name. Aliases and public identifiers
    are optional; adding a known website can improve relevance.
-2. Press **Start investigation**. The app searches Wikipedia/Wikidata, collects
-   candidate profiles and relationship claims, resolves names, collects a Wikipedia
-   page, searches recent GDELT news and follows up to two articles. It also collects
-   DNS, registration, TLS and website evidence for one supplied or candidate domain.
-3. Read the dossier while progress updates. Candidates remain unconfirmed: a shared
-   name is not proof of identity. Each profile, claim and news item keeps evidence
-   references. **Collection log** explains unavailable sources. **Stop** retains
-   sources already saved and stops before the next request.
+2. Press **Start investigation**. The app searches the real public web through
+   DuckDuckGo Lite, saves the original search response, and follows relevant public
+   pages. A Wikipedia entry is not required. Selected Wikipedia/Wikidata, recent
+   GDELT news and domain tools add further evidence when available.
+3. For a common name, edit **Web search query** and add **Public context**, such as
+   a public location, employer or topic. The default query quotes the subject's
+   full name. Existing contact details are not appended to searches automatically.
+   Select the tools you want, set limits, then click **Run investigation**.
+4. Follow **Tool activity** while the run works. Each call shows its inputs, status,
+   result or error, timing, source evidence and whether the engine, AI or you
+   requested it. **Edit & retry** changes and reruns one tool without rerunning the
+   whole investigation. **Run a tool** starts a separate search, page collection,
+   domain signal or evidence read. Earlier activity and sources stay saved.
+5. Read the dossier and its source references. Automatic follow-up requires a
+   complete subject-name or alias match in the result title/snippet; partial name
+   fragments do not qualify. This is a relevance filter, not proof of identity.
+   Candidates and AI drafts remain unconfirmed. **Stop** retains sources already
+   saved and stops before the next request.
    Wikidata claims preserve statement rank, qualifiers, date precision and calendar;
    deprecated claims are excluded and ended website claims are not followed.
-4. Optionally open **Local AI**, click **Start local AI**, wait for Ready and enable
+6. Optionally open **Optional local AI**, click **Start local AI**, wait for Ready and enable
    **Add AI analysis to next run**. Then run the investigation again. AI reads the
-   sources, uses bounded tools and drafts a summary locally.
-5. Inspect indicators and original sources below the dossier. Advanced sections let
-   you search an alias, collect another known public page or import your own evidence.
-6. Export a readable Markdown dossier or complete JSON export with originals,
+   sources, searches the public web, follows approved leads and drafts locally.
+   **Analyze collected evidence** can retry AI independently, including after a
+   failed or incomplete draft.
+7. Inspect indicators and original sources below the dossier, or import your own
+   evidence. Export a readable Markdown dossier or complete JSON export with originals,
    fingerprints, timestamps, subject metadata, run history and source references.
 
-An investigation uses at most 24 collection request units and a 180-second soft
-collection deadline. One run at a time. Requests in flight finish before cancellation;
+The default **request ceiling is 24**, configurable from 1 to 64. It is a limit,
+not a target: a run can finish at 9 requests when its selected work and relevant
+follow-ups are done. The status explains whether work finished, a limit was reached,
+you stopped it, or tools were unavailable. Units count collection operations;
+registration reserves two, and a permitted redirect can add HTTP requests within
+one operation. Reading saved evidence and local model requests use no outbound units.
+
+The page goal defaults to **4 successful page collections**, configurable from 1
+to 8. Failed pages still consume request units but do not fill the page goal; the
+engine tries later relevant results. With AI enabled, automatic collection reserves
+a page slot for model follow-up. There is a 300-second soft run deadline and one run
+at a time. Requests in flight finish before cancellation;
 OS DNS follows the OS timeout policy. Restart marks unfinished runs **interrupted**
 and keeps collected evidence; it never automatically resumes outbound collection.
-A partial result is useful evidence, not complete coverage. News rate limits,
-redirects and blocked sites appear as source failures.
+A partial result is useful evidence, not complete coverage. Search challenges,
+news rate limits and blocked sites appear as tool failures. Inspect the saved search
+response when available, edit the query or retry later. No challenge bypass occurs.
 
-Coverage begins with public encyclopedic sources and recent news. Subjects absent
-from those sources may need an alias or known public identifier. No social-account
+Coverage includes indexed public websites, profiles, organization pages, news and
+encyclopedic sources. Ordinary people can have useful web results without appearing
+on Wikipedia. Sparse or ambiguous results may need an alias, public context or known
+public URL; absence of results does not prove absence of a public footprint. No social-account
 enumeration, login-required scraping, people-search brokers, facial recognition,
 identity attribution, vulnerability scanning or unrestricted crawling.
 
@@ -90,18 +114,31 @@ The app provides these tools; you do not need to install an extra tool server:
 
 | Tool | Capability |
 | --- | --- |
+| `web_search` | Send a subject-scoped query to DuckDuckGo Lite and discover public sources |
 | `search_subject` | Read this run's public candidate search results |
 | `news_search` | Read this run's recent news search results |
-| `collect_page` | Collect a URL already found for this investigation |
+| `collect_page` | Collect a relevant discovered URL or approved link from a collected page |
 | `domain_signals` | Collect an approved domain's public records |
 | `read_evidence` | Read a collected source from this run |
 
-Search tools reuse collected results. The model cannot transmit new free-form
-queries, fetch invented URLs, access other cases or execute commands. Up to four
+`search_subject` and `news_search` reuse collected results; `web_search` performs
+real searches. Model queries must include the subject's name or alias and use only
+approved public context, source domains and bounded profile/news keywords. The model
+cannot send unrelated queries, fetch invented URLs, access other cases or execute
+commands. Tool activity exposes its actual calls and failures. Up to four
 model turns and six tool calls; 512 generated tokens per turn. AI drafts can be
-wrong and remain labelled unverified. An evidence read is required before drafting
-when sources exist. Source references let you check the result. Token-limited
-drafts are explicitly marked incomplete and retained for inspection.
+wrong and remain labelled unverified. The model is directed to search and follow a
+relevant page; successful evidence reading is required before a draft is accepted
+when sources exist. A required search/tool failure leaves the draft incomplete.
+The first AI search uses your configured public query, adding the quoted subject
+only if no complete subject or alias is present. Required page/evidence calls choose
+from available leads and saved source IDs. Model search queries cap at 200 characters;
+shorten the query if adding the subject would exceed this limit.
+Source references let you check the result. Token-limited drafts are explicitly
+marked incomplete and retained for inspection. Later timeouts preserve completed
+tool calls, so you can inspect them and retry analysis.
+Cached tool reuse is also visible and uses no collection unit. AI follow-up prefers
+untried leads; use an individual retry to attempt a previously failed page again.
 **Stop local AI** or stopping the app shuts down only its owned model process.
 Initial loading can take a minute and requires enough free memory. External model
 servers and unrelated llama.cpp sessions are left alone.
@@ -110,24 +147,38 @@ servers and unrelated llama.cpp sessions are left alone.
 
 | Source | Collected signal | What goes outside your machine |
 | --- | --- | --- |
+| DuckDuckGo Lite | Up to 10 public web results per search | Full query, including chosen public context; AI's approved query refinements |
 | Wikipedia / Wikidata | Candidates, profiles, relationship labels and a page | Subject name or first alias; selected public IDs and page requests |
 | GDELT / linked news sites | Up to 8 recent mentions; up to 2 article pages | Quoted subject name; selected article requests |
 | Local llama.cpp (optional) | Tool calls and draft summary | Nothing: authenticated loopback; cached model only |
 | OS DNS resolver | A/AAAA address results | Requested domain |
 | IANA + domain registry | RDAP registration response | Registry sees requested domain; IANA sees bootstrap request |
 | Domain TLS endpoint | Verified certificate and DER bytes | Requested hostname and connection |
-| Public HTTPS site | One page, up to 2 MiB | Requested hostname/path |
+| Public HTTPS sites and redirect destinations | Selected pages, up to 2 MiB each | Requested hostname, path and allowed query parameters at every hop |
 
 Destination services can see your public IP address. System DNS behavior depends
 on your OS/network. Local processing is private; network collection is observable.
 There are no credentials or cookies sent to providers, no proxy environment use,
-no automatic retries, and only bounded follow-up of discovered profiles and article links. Requests have size and
+no automatic retry of failed requests, and only bounded follow-up of discovered
+public pages and links. Requests have size and
 socket timeout limits. OS DNS resolution has the OS's timeout policy.
 
 Collection permits public HTTPS on port 443. Private/special-use addresses,
-credentials in URLs and redirects are blocked. User page URLs must not include
-query parameters or fragments; built-in provider searches create narrowly scoped query parameters. Some sites require redirects, login, JavaScript or different
-encodings and will be unavailable. The app reports that failure. Registration strips a leading `www.` from the website host; other subdomains can lack registration records. Candidate HTTP website claims may be attempted over HTTPS, with normal certificate verification.
+credentials in URLs and HTTPS-to-HTTP downgrades are blocked. Investigation and
+individual page tools permit query parameters because public profile/search URLs
+often need them. Treat queries as outbound data: avoid private identifiers, access
+tokens or signed links. At most three redirects are followed, with public-address
+validation, IP pinning and TLS verification repeated for every destination. Each
+redirect destination can observe the request it receives. Final page URLs stay in
+source evidence. Fragments are not accepted by page tools; result fragments are
+removed before collection. The standalone CLI `fetch` command retains its simpler
+no-query restriction.
+
+Login-required, JavaScript-only, non-UTF-8 or unsupported content may be unavailable.
+The app reports failure instead of silently claiming no results. Registration strips
+a leading `www.` from the website host; other subdomains can lack registration
+records. Candidate HTTP website claims may be attempted over HTTPS, with normal
+certificate verification.
 
 See [security and privacy](SECURITY.md) for controls, assumptions and limits.
 
@@ -232,7 +283,8 @@ loopback ports. No provider credentials, live targets or internet access require
 See [design and acceptance](docs/design.md), [validation evidence](docs/validation.md),
 and [contributing](CONTRIBUTING.md).
 
-Primary protocol references: [IANA RDAP bootstrap registry](https://www.iana.org/assignments/rdap-dns/),
+Primary protocol references: [DuckDuckGo non-JavaScript search](https://duckduckgo.com/duckduckgo-help-pages/features/non-javascript),
+[IANA RDAP bootstrap registry](https://www.iana.org/assignments/rdap-dns/),
 [RDAP query format](https://www.rfc-editor.org/rfc/rfc9082.html),
 [MediaWiki search API](https://www.mediawiki.org/wiki/API:Search), and
 [Wikidata data access](https://www.wikidata.org/wiki/Wikidata:Data_access).

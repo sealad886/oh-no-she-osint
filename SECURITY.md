@@ -28,23 +28,47 @@ assess evidence before attributing it to a person or organization.
   Eight request workers maximum, finite client/socket timeouts, no automatic retries.
 - Collection validates all DNS addresses and pins the chosen public IP for the TLS
   connection with original hostname verification. Private, reserved, multicast,
-  mapped and common IPv6 transition address ranges are refused. Redirects, proxies,
-  authentication, outgoing cookies and compressed content are unsupported.
+  mapped and common IPv6 transition address ranges are refused. At most three
+  redirects are followed; every hop repeats URL validation, public DNS validation,
+  IP pinning and TLS hostname verification. Loops, private destinations and HTTPS
+  downgrades are refused. Proxies, authentication, outgoing cookies and compressed
+  content are unsupported. The final URL remains the evidence source.
 - Collection requires a process-level flag and an explicit user action. Offline
   mode rejects all collection paths before DNS or connection. Built-in discovery
-  and news search construct query parameters for fixed public providers.
-- No request/evidence logging, analytics, cloud storage, cloud AI calls, CDN dependencies,
+  and news search construct query parameters for fixed public providers. Real web
+  search sends a user-approved query to DuckDuckGo Lite without an API key.
+  Investigation/page tools permit query parameters on selected public URLs;
+  standalone CLI `fetch` rejects them. Queries are outbound data, including those
+  received from links or redirects, and can contain tracking values. URL credentials
+  and fragments remain prohibited.
+- No HTTP access logs, analytics, cloud storage, cloud AI calls, CDN dependencies,
   or environment TLS key logging. CLI errors suppress private filesystem details.
 
 ## Automatic collection and model boundary
 
-Runs reserve one worker, a 24-request-unit budget and a 180-second soft deadline.
-Returned public URLs use the same public-address pinning and redirect rejection as
-manual collection. Registration reserves two units for directory and registry.
+Runs reserve one worker, a default 24-request-unit ceiling (configurable 1–64),
+a default four-successful-page goal (configurable 1–8), and a 300-second soft
+deadline. A ceiling bounds work; it is not a completion target. Failed collection
+attempts consume units but do not fill the successful-page goal. Registration
+reserves two units for directory and registry; redirect contacts occur within an
+operation rather than consuming separate units. Returned URLs use the same
+public-address pinning and redirect revalidation as manual collection.
 Checkpoints and final dossiers are local derived evidence with no extracted mentions;
 all originals and reports remain exportable. Restart marks running checkpoints
-interrupted without resuming requests. Namesake profiles remain separate, unconfirmed
-candidates. Default candidate-domain research uses only the first candidate profile's
+interrupted without resuming requests. Activity records tool arguments, origin,
+start/finish time, results or errors and source IDs. Individual retries create a new
+run while retaining earlier report evidence and tool history. Only the selected tool
+runs again; a human can explicitly edit its query, URL, domain or selected signals.
+
+Real web search saves the original public search response before interpreting it.
+Malformed or challenge pages report failure, not an empty footprint; no challenge
+bypass is attempted. Automatic follow-up requires a full subject-name or alias match
+in a title/snippet. Wikipedia/Wikidata results use the same full-name relevance
+filter, so unrelated name fragments do not drive profile collection. This heuristic
+cannot confirm identity or guarantee relevance. User-entered public context narrows
+queries; stored contact identifiers are not silently appended. Email-provider domains
+are not researched automatically. Namesake profiles remain separate, unconfirmed
+candidates. Candidate-domain research uses only the first collected profile's
 website claims, with its candidate and evidence IDs attached.
 Structured claims retain rank and qualifiers; temporal values display only fields
 supported by their declared precision, with calendar and uncertainty metadata.
@@ -58,13 +82,24 @@ path or endpoint. A trusted startup `--model` flag can choose a different local 
 The app stops only its owned process. Model responses cap at 1 MiB, prompts at 128 KiB,
 four turns and six tool calls. GPU memory is model-dependent, not resource-isolated.
 
-A central dispatcher permits only this run's evidence IDs and discovered URL/domain
-leads. Search tools take no arguments and return already-collected public responses;
-model-generated text cannot become an outbound query. Sources are explicitly untrusted
+A central dispatcher permits only case-run evidence IDs and approved URL/domain
+leads. The model's real `web_search` queries must contain the full subject name or
+alias and use only approved public context, approved source domains and a bounded
+keyword vocabulary. The model cannot add unrelated tokens, new private contact
+identifiers or arbitrary query text. The query is still observable by the provider.
+`search_subject` and `news_search` return already-collected responses; `collect_page`
+can follow relevant search results or approved links discovered on collected pages.
+New URLs invented by the model, other cases, filesystem tools and shell commands
+are rejected. Selected source controls and process-level network permission constrain
+outbound model tools; offline AI can read saved evidence without web collection.
+Sources are explicitly untrusted
 in prompts. Enforced tool restrictions contain prompt injection even if the model
 ignores those prompts. They do not make model conclusions trustworthy. AI drafts
 remain unverified and citations are filtered against known run evidence IDs.
-The first model turn must read evidence when sources exist. Truncated responses
+The model is directed to search and follow sources; successful evidence reading
+is required before accepting a draft when sources exist. Required tool failures
+mark the draft incomplete. Tool calls, including blocked attempts, are shown in
+activity alongside engine and human calls. Truncated responses
 are visibly incomplete and make the investigation partial; text is retained.
 
 ## Residual limits
@@ -77,7 +112,10 @@ and backups. A copied launch link grants access while that app process is runnin
 Local HTTP is not encrypted; do not forward its port, reverse-proxy it, or share it.
 
 DNS resolution uses OS resolver behavior and timeout policy. Website operators,
-Wikipedia/Wikidata, news services and registries can observe collection requests and public IP.
+DuckDuckGo, Wikipedia/Wikidata, news services and registries can observe collection
+requests and public IP. Page queries and redirect destinations expand the observable
+request scope. Search results and follow-up links are not a guarantee that a source
+is benign; public pages can redirect to other public sites within the allowed bounds.
 Public data can be stale, incomplete, malicious or misleading. A successful TLS
 handshake authenticates the endpoint certificate, not the truth of its content.
 
