@@ -15,6 +15,8 @@ from urllib.parse import parse_qs, urlsplit
 
 from .collector import collect, research, discover
 from .engine import InvalidInput, MAX_BYTES
+from .investigation import Jobs
+from .ai import LocalAI
 
 STATIC = Path(__file__).parent / "static"
 MAX_REQUEST = 3 * 1024 * 1024
@@ -24,7 +26,7 @@ class LocalServer(ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = 8
 
-    def __init__(self, engine, port=0, allow_network=False):
+    def __init__(self, engine, port=0, allow_network=False, model_path=None):
         self.engine = engine
         self.allow_network = allow_network
         self.token = secrets.token_urlsafe(32)
@@ -32,6 +34,14 @@ class LocalServer(ThreadingHTTPServer):
         super().__init__(("127.0.0.1", port), Handler)
         self.origin = f"http://127.0.0.1:{self.server_port}"
         self.host = f"127.0.0.1:{self.server_port}"
+        self.ai = LocalAI(engine, model_path)
+        self.jobs = Jobs(engine, allow_network, self.ai)
+
+    def server_close(self):
+        if hasattr(self, 'jobs'):
+            self.jobs.close()
+            self.ai.stop()
+        super().server_close()
 
     def get_request(self):
         sock, address = super().get_request()
@@ -172,6 +182,10 @@ class Handler(BaseHTTPRequestHandler):
                     self.reply(200, engine.cases())
                 elif path == "/api/view":
                     self.reply(200, engine.view(case_id, params.get("q", [""])[0], params.get("kind", [""])[0]))
+                elif path == "/api/investigation":
+                    self.reply(200, self.server.jobs.get(case_id))
+                elif path == "/api/ai":
+                    self.reply(200, self.server.ai.status())
                 elif path == "/api/evidence":
                     self.reply(200, engine.evidence(case_id, params.get("id", [""])[0]))
                 elif path == "/api/entity":
@@ -187,6 +201,14 @@ class Handler(BaseHTTPRequestHandler):
                 data = self.body()
                 if path == "/api/cases":
                     self.reply(201, engine.create_case(data.get("name"), data.get("focus_type", "topic"), data.get("aliases"), data.get("identifiers")))
+                elif path == "/api/investigate":
+                    self.reply(202, self.server.jobs.start(data.get('case'), data.get('ai', False)))
+                elif path == "/api/stop":
+                    self.reply(200, self.server.jobs.stop(data.get('case'), data.get('run_id')))
+                elif path == "/api/ai/start":
+                    self.reply(202, self.server.ai.start())
+                elif path == "/api/ai/stop":
+                    self.reply(200, self.server.ai.stop())
                 elif path == "/api/import":
                     value = data.get("original_base64")
                     if not isinstance(value, str):

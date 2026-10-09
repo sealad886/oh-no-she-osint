@@ -6,7 +6,9 @@ No user acceptance or exhaustive security certification is claimed.
 
 ## Behavioral checks
 
-46 standard-library unittest cases pass, including:
+The initial engine and launcher checks comprised 46 standard-library unittest
+cases. The automatic-investigation correction below brings the suite to 73.
+Initial checks include:
 
 - Canonical launcher bootstrap in a fresh project with spaces, browser-link
   handoff and authenticated loopback session, automatic default port, explicit
@@ -85,8 +87,9 @@ Graphify AST refresh completed: 222 nodes, 470 edges, 13 communities.
 
 ## Limits and release disposition
 
-The app is a local single-user evidence engine. Discovery covers Wikipedia/Wikidata;
-other subjects require known URLs/imports. Co-occurrence and candidate matches
+The app is a local single-user evidence engine. Automatic collection covers
+Wikipedia/Wikidata, recent GDELT news and public domain signals; subjects absent
+from those sources may need aliases or known public URLs. Co-occurrence and candidate matches
 never establish identity, ownership or truth. Security assumptions and residual
 risks are documented in [SECURITY.md](../SECURITY.md).
 
@@ -95,6 +98,83 @@ multiple Python versions, Windows ACL behavior and unattended service deployment
 are not validated. There is no configured Git remote. External PR/CI/release checks
 cannot run until an existing repository identity is supplied. Local review and
 verification do not count as remote CI, publication or user acceptance.
+
+## Automatic investigation and local AI, 2026-10-09
+
+The user correctly identified that the manual-first baseline failed click-to-run
+acceptance. The primary path now starts collection from a subject name, displays
+progress and produces a sourced dossier without manual import. Optional local AI
+is supplied five bounded tools by the app; no separate tool server is needed.
+
+Final full suite: **73 tests passed in 7.445 seconds**. Added regressions prove
+name-only collection and provenance, offline/unknown-case rejection before DNS,
+partial failure and cancellation retention, request/time limits, single-job
+reservation, interrupted-run recovery, known-identifier priority, case/URL/domain
+tool restrictions, statement rank and qualifiers, temporal precision in JSON,
+Markdown and model input, required evidence reads and explicit AI truncation.
+Python compilation, JavaScript syntax, launcher shell syntax and diff whitespace
+checks passed. Two SQLite ResourceWarnings originate in test fixtures; no product
+failure was established by those warnings.
+
+Actual canonical browser runs used only public demonstration subjects:
+
+| Subject | Collected external source IDs | Successful / attempted collection steps | Request units |
+| --- | --- | --- | --- |
+| Ada Lovelace | 6 | 6 / 7 | 7 |
+| Mozilla | 10 | 10 / 11 | 12 |
+
+Namesake profiles remained separate unconfirmed candidates. Automatic domain
+research used only the first selected profile unless a known identifier supplied
+the domain. Mozilla DNS, RDAP, certificate and website collection succeeded.
+Ada dates showed declared day precision; Firefox historical claims displayed end
+qualifiers with month/day precision. GDELT was unavailable during these runs:
+direct checks observed HTTP 429, and some requests timed out. The UI retained
+successful evidence and reported partial coverage. Successful live news-article
+collection is not claimed; synthetic tests cover metadata retention and article
+failure. These observations prove integrations at that time, not future availability.
+
+Native model validation used installed llama.cpp **0.6.0, build 11429,
+commit d81235049** and the already-cached REDCELL I-Compact GGUF
+(**14,651,485,440 bytes**). No model or package download was performed. Owned
+fixture runs confirmed actual tool calling, a required evidence read and a normal
+completed draft. Those fixture runs are separate from real-provider verification.
+
+In the actual browser, the app started its own local model process. The final
+Mozilla investigation made one successful `read_evidence` model tool call and
+displayed a sourced, unverified draft. Browser warnings/errors were empty at the
+final check. Earlier actual JSON and Markdown downloads of the same workflow
+passed: JSON retained original bytes, ten collected source IDs, a normal model
+finish reason and citation IDs belonging to the run; Markdown included the dossier,
+AI draft and historical claim qualifiers. An additional final JSON download check
+stalled and was interrupted; it is not counted as a successful check. The completed
+final browser dossier and screenshot remain separate evidence of the runtime flow.
+
+Independent automatic-feature review used three rounds, with root-cause searches
+across central owners and sibling consumers before each repair:
+
+| Round | Finding | Resolution |
+| --- | --- | --- |
+| 1 | Rank/qualifiers were lost; historical website leads could be followed | Preserve bounded rank/qualifiers, exclude deprecated statements and ended website leads |
+| 1 | Model truncation looked like a completed draft | Preserve finish reason, mark truncated/limited drafts and partial runs |
+| 2 | Year-only timestamps displayed unsupported month/day fields | Shared precision-aware temporal projection for main claims and qualifiers |
+| 3 | No actionable P1/P2 finding within bounded scope | Independently reran all 73 tests in 5.800 seconds; whitespace check passed |
+
+Round 3 independently verified frozen snapshot
+`c44add628282605733961b6179156e666657045bbf58a32a596c367046eec4a3`.
+Its algorithm hashes sorted tracked and nonignored untracked files, relative path
++ NUL + contents + NUL. Source/tests remained unchanged after review; final
+documentation receipts were appended afterward. Graphify AST refresh completed
+with 344 nodes, 814 edges and 17 communities. Review is bounded source/synthetic
+verification; it is not exhaustive security certification or user acceptance.
+
+Delivery remains medium-feature-change, medium scale and high risk at the
+untrusted-URL/model-tool boundaries. Existing design, acceptance, implementation,
+quality, security, documentation and independent-review owners were reused. No
+schema migration was needed. Retrospective outcome: launch/import success did not
+prove the user's intended product. Future automatic-investigation acceptance must
+exercise name-to-dossier collection and, when enabled, actual local model tools.
+No remote, PR, remote CI, publication or release was created. Windows, additional
+Python versions and other GGUF model families remain unvalidated.
 
 ## Canonical launcher repair, 2026-10-09
 

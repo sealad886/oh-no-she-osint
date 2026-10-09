@@ -16,7 +16,7 @@ An explicit offline mode requires no external service. User-observed acceptance
 remains outstanding.
 
 Excluded: account login, paid APIs, scraping search engines, bulk crawling, identity
-attribution, facial recognition, vulnerability scanning, remote hosting, AI services,
+attribution, facial recognition, vulnerability scanning, remote hosting, cloud AI services,
 and cloud sync. No such systems are necessary for this workflow.
 
 ## Acceptance and traceability
@@ -105,9 +105,54 @@ Six live provider checks and the actual person/organization browser workflow pas
 See [validation evidence](validation.md) for exact scope and untested surfaces.
 External PR/review/CI/release delivery remains blocked by the missing remote.
 
+## Automatic investigation and local AI correction
+
+The manual-first baseline did not meet the user's click-to-run requirement. The
+accepted correction is: enter a person, organization, domain or topic, press Start
+investigation, and receive collected public evidence and a source-linked dossier.
+The existing medium-feature-change route remains active, with security review for
+returned public URLs and model tool dispatch. Local-only processing includes an
+optional owned llama.cpp process; the engine works without a model or API keys.
+
+The bounded run searches Wikipedia/Wikidata, collects up to two candidate profiles,
+resolves up to twenty linked entity labels, collects a Wikipedia page, searches
+recent GDELT news, follows up to two articles, and investigates one public domain
+from known identifiers or candidate website claims. Namesake candidates remain
+separate and unconfirmed. Every structured claim carries candidate and evidence
+IDs. Failed sources leave successful evidence intact. The UI shows steps, stop,
+partial results and source links. All original responses and the derived dossier
+are exported. Derived reports do not contribute extracted indicator mentions.
+
+One active run, at most 24 collection request units, 180-second soft collection
+deadline, existing 2 MiB response caps, and cancellation between requests limit
+resources. Registration reserves two request units. Running checkpoints persist
+as local report evidence; restart marks unfinished work interrupted rather than
+silently resuming outbound requests. No schema migration is needed.
+
+Optional local AI uses OpenAI-compatible tool calls over authenticated loopback.
+Tools can search this subject, search its news, collect already-discovered URLs,
+investigate approved domains, and read evidence in this run. No shell, arbitrary
+filesystem, cloud endpoint or unrelated-case access. Search arguments cannot
+transmit model-generated text or private evidence. At most six tool calls and four
+model turns. Sources are untrusted data; model output is an explicitly unverified
+draft with source IDs. Model startup uses a cached local GGUF, never an automatic
+download, and stops only the process this app owns.
+
+Acceptance additions: automatic person and organization runs collect evidence
+without manual import; offline start performs no DNS; cancellation/restart retain
+partial evidence; model tool calls enforce case, URL/domain and call budgets;
+real local-model verification is reported separately from simulated tool tests.
+
+These additions are implemented and verified with 73 behavioral tests, independent
+review, actual person/organization browser runs and native REDCELL tool calling.
+Claims retain rank, qualifiers and temporal precision; incomplete AI output stays
+explicitly partial. See the automatic-investigation section of the validation record
+for provider failures, review snapshot identity and remaining acceptance limits.
+
 Canonical startup repair: the CLI now selects a free loopback port by default.
 Explicit configured/requested ports are honored and report occupied-port recovery
 instructions. Real fresh-environment launcher tests cover browser-link handoff and
 session authentication. See validation evidence for the observed default-port
 collision and repaired canonical startup; the original 42-test snapshot above is
-historical, and current suite has 46 tests.
+historical, and the automatic-investigation correction brings the current suite to
+73 tests.

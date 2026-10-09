@@ -32,9 +32,40 @@ assess evidence before attributing it to a person or organization.
   authentication, outgoing cookies and compressed content are unsupported.
 - Collection requires a process-level flag and an explicit user action. Offline
   mode rejects all collection paths before DNS or connection. Built-in discovery
-  alone constructs query parameters for fixed public providers.
-- No request/evidence logging, analytics, cloud storage, AI calls, CDN dependencies,
+  and news search construct query parameters for fixed public providers.
+- No request/evidence logging, analytics, cloud storage, cloud AI calls, CDN dependencies,
   or environment TLS key logging. CLI errors suppress private filesystem details.
+
+## Automatic collection and model boundary
+
+Runs reserve one worker, a 24-request-unit budget and a 180-second soft deadline.
+Returned public URLs use the same public-address pinning and redirect rejection as
+manual collection. Registration reserves two units for directory and registry.
+Checkpoints and final dossiers are local derived evidence with no extracted mentions;
+all originals and reports remain exportable. Restart marks running checkpoints
+interrupted without resuming requests. Namesake profiles remain separate, unconfirmed
+candidates. Default candidate-domain research uses only the first candidate profile's
+website claims, with its candidate and evidence IDs attached.
+Structured claims retain rank and qualifiers; temporal values display only fields
+supported by their declared precision, with calendar and uncertainty metadata.
+Deprecated claims and ended website leads cannot drive automatic domain research.
+
+Optional llama.cpp runs from a local cached GGUF in an owned subprocess. It binds
+127.0.0.1, requires a random API key passed through process environment, disables
+its web UI, downloads, built-in tools and prompt logging, and clears ambient llama
+options, proxy settings and TLS key logging. Browser requests cannot choose a model
+path or endpoint. A trusted startup `--model` flag can choose a different local GGUF.
+The app stops only its owned process. Model responses cap at 1 MiB, prompts at 128 KiB,
+four turns and six tool calls. GPU memory is model-dependent, not resource-isolated.
+
+A central dispatcher permits only this run's evidence IDs and discovered URL/domain
+leads. Search tools take no arguments and return already-collected public responses;
+model-generated text cannot become an outbound query. Sources are explicitly untrusted
+in prompts. Enforced tool restrictions contain prompt injection even if the model
+ignores those prompts. They do not make model conclusions trustworthy. AI drafts
+remain unverified and citations are filtered against known run evidence IDs.
+The first model turn must read evidence when sources exist. Truncated responses
+are visibly incomplete and make the investigation partial; text is retained.
 
 ## Residual limits
 
@@ -46,14 +77,13 @@ and backups. A copied launch link grants access while that app process is runnin
 Local HTTP is not encrypted; do not forward its port, reverse-proxy it, or share it.
 
 DNS resolution uses OS resolver behavior and timeout policy. Website operators,
-Wikipedia/Wikidata and registries can observe collection requests and public IP.
+Wikipedia/Wikidata, news services and registries can observe collection requests and public IP.
 Public data can be stale, incomplete, malicious or misleading. A successful TLS
 handshake authenticates the endpoint certificate, not the truth of its content.
 
 There is no unlimited-corpus or denial-of-service guarantee. A malicious same-user
 process can exhaust worker slots, disk space or total case size. Extraction is a
-bounded heuristic; false positives and missed indicators are possible. No model
-infers identity. Aliases and identifiers are user-supplied context; shared sources
+bounded heuristic; false positives and missed indicators are possible. No model output confirms identity. Aliases and identifiers are user-supplied context; shared sources
 are co-occurrence, not confirmed relationships. No claim of legal compliance or
 independent exhaustive security audit is made.
 

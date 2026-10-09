@@ -74,6 +74,7 @@ async function refresh() {
   if (!data.entities.length) $('indicators').append(node('p', data.counts.evidence ? 'No matching indicators. Try a different search or inspect the original evidence.' : 'Your first clue is waiting. Add evidence to begin.', 'empty-results'));
   if (!data.evidence.length) $('sources').append(node('p', 'No matching evidence. Add a source or adjust your search.', 'empty-results'));
   if (data.entities.length === data.limits.entities) $('indicators').append(node('p', 'Showing up to 500 indicators. Narrow your search; exports include all results.', 'small'));
+  await refreshRun(caseId);
   if (data.evidence.length === data.limits.evidence) $('sources').append(node('p', 'Showing up to 200 sources. Narrow your search; exports include all results.', 'small'));
 }
 function detail(title) {
@@ -119,7 +120,9 @@ action($('close-detail'), () => $('detail-dialog').close());
 action($('case-form'), async () => {
   const created = await api('/api/cases', {name: $('case-name').value, focus_type: $('focus-type').value, aliases: $('aliases').value.split('\n').map(x => x.trim()).filter(Boolean), identifiers: $('identifiers').value.split('\n').map(x => x.trim()).filter(Boolean)});
   $('case-dialog').close(); $('case-form').reset(); $('search').value = ''; $('kind').value = '';
-  await loadCases(created.id); notice('Case created. Add evidence or collect public signals.');
+  await loadCases(created.id);
+  if (status.network) await startInvestigation(created.id);
+  else notice('Offline case created. Import saved evidence to begin.');
 }, 'submit');
 action($('case-select'), async () => { currentCase = $('case-select').value; $('search').value = ''; $('kind').value = ''; await refresh(); }, 'change');
 let searchTimer;
@@ -217,7 +220,111 @@ for (const [index, id] of ['indicators-tab', 'sources-tab'].entries()) $(id).add
     $('collect-button').disabled = !status.network;
     $('research-button').disabled = !status.network;
     $('discovery-button').disabled = !status.network;
+    $('create-investigation').textContent = status.network ? 'Start investigation ↗' : 'Create offline case';
+    $('start-notice').hidden = !status.network;
+    $('run-investigation').disabled = !status.network;
+    await refreshAI();
     $('workspace').hidden = false;
     await loadCases();
   } catch (error) { $('locked').hidden = false; notice(error.message); }
 })();
+
+let displayedRun = null, runTimer, aiTimer;
+async function startInvestigation(caseId) {
+  notice('Investigation started. Sources and progress appear below.');
+  const report = await api('/api/investigate', {case: caseId, ai: $('use-ai').checked});
+  if (currentCase === caseId) renderRun(report, caseId);
+}
+function sourceLink(area, caseId, id, label = 'View source') {
+  if (id) area.append(resultButton('source', label, 'Open ↗', () => showEvidence(caseId, id)));
+}
+function renderRun(report, caseId) {
+  if (currentCase !== caseId) return;
+  clearTimeout(runTimer);
+  displayedRun = report;
+  const running = report?.status === 'running';
+  $('run-investigation').disabled = running || !status.network;
+  $('stop-investigation').hidden = !running;
+  $('run-progress').textContent = report ? `${report.stage} · ${report.steps.filter(s => s.ok).length} collected steps / ${report.steps.length} attempted · ${report.request_units || 0} of 24 request units` : 'Enter subject and run investigation. No manual evidence required.';
+  const area = $('dossier'); area.replaceChildren();
+  if (report) {
+    area.append(node('p', report.interpretation, 'small'));
+    if (report.error) area.append(node('p', report.error));
+    for (const profile of report.profiles) {
+      const card = node('article', undefined, 'profile-card');
+      card.append(node('p', 'UNCONFIRMED CANDIDATE / ' + profile.candidate_id, 'eyebrow'), node('h3', profile.label), node('p', profile.description));
+      for (const claim of profile.claims) {
+        const context = (claim.qualifiers || []).map(q => q.label + ': ' + q.value);
+        if (claim.qualifiers_truncated) context.push('More qualifiers in original source');
+        card.append(node('p', claim.label + ': ' + claim.value + ' · ' + (claim.rank || 'normal') + ' statement' + (context.length ? ' · ' + context.join('; ') : '')));
+      }
+      sourceLink(card, caseId, profile.source_id, 'Original candidate profile');
+      const labelIds = [...new Set(profile.claims.map(c => c.label_source_id).filter(Boolean))];
+      for (const id of labelIds) sourceLink(card, caseId, id, 'Relationship label source');
+      area.append(card);
+    }
+    if (report.articles.length) {
+      area.append(node('h3', 'Recent news mentioning this name'));
+      for (const article of report.articles) {
+        const card = node('article', undefined, 'profile-card');
+        card.append(node('h4', article.title), node('p', article.url, 'detail-meta'), node('p', [article.seendate, article.language, article.sourcecountry].filter(Boolean).join(' · '), 'small'));
+        sourceLink(card, caseId, article.page_source_id || article.source_id, article.page_source_id ? 'Collected article' : 'News search source');
+        area.append(card);
+      }
+    }
+    if (report.domain_lead) area.append(node('p', `Domain lead: ${report.domain_lead.domain} · ${report.domain_lead.basis}`, 'small'));
+    if (!report.profiles.length && report.candidates.length) {
+      area.append(node('h3', 'Public search leads'));
+      for (const candidate of report.candidates.slice(0, 10)) {
+        area.append(node('p', candidate.label + ' — ' + candidate.description));
+        sourceLink(area, caseId, candidate.discovery_source_id);
+      }
+    }
+    if (report.ai) {
+      area.append(node('h3', 'Local AI draft — verify against sources'), node('pre', report.ai.summary || report.ai.error || 'No draft returned.', 'evidence-text'));
+      if (report.ai.status === 'truncated') area.append(node('p', 'AI draft reached its output limit and is incomplete. Read collected sources for the full evidence.', 'small'));
+      for (const id of report.ai.source_ids || report.source_ids) sourceLink(area, caseId, id, 'AI evidence reference');
+      if (report.ai.error) area.append(node('p', report.ai.error, 'small'));
+      area.append(node('p', `${report.ai.tool_calls?.length || 0} local AI tool calls. Model output may be wrong.`, 'small'));
+    }
+    const steps = node('details'); steps.append(node('summary', 'Collection log and unavailable sources'));
+    for (const step of report.steps) {
+      steps.append(node('p', `${step.ok ? 'Collected' : 'Unavailable'} · ${step.label}${step.error ? ' · ' + step.error : ''}`, 'small'));
+      sourceLink(steps, caseId, step.source_id);
+    }
+    if (!report.source_ids.length && !running) area.append(node('p', 'No public evidence collected. See source errors; try a known alias or public website identifier.'));
+    area.append(steps);
+  }
+  if (running) runTimer = setTimeout(async () => {
+    try {
+      if (currentCase !== caseId) return;
+      const next = await api('/api/investigation?' + new URLSearchParams({case: caseId}));
+      if (currentCase !== caseId) return;
+      renderRun(next, caseId);
+      if (next?.status !== 'running') { await refresh(); notice('Investigation ' + next.status + '. Evidence retained locally.'); }
+    } catch (error) { notice(error.message); }
+  }, 1200);
+}
+async function refreshRun(caseId) {
+  const report = await api('/api/investigation?' + new URLSearchParams({case: caseId}));
+  if (currentCase === caseId) renderRun(report, caseId);
+}
+async function refreshAI() {
+  clearTimeout(aiTimer);
+  const ai = await api('/api/ai');
+  $('ai-status').textContent = 'Local AI: ' + ai.state + (ai.error ? ' · ' + ai.error : '');
+  $('use-ai').disabled = ai.state !== 'ready';
+  if (ai.state !== 'ready') $('use-ai').checked = false;
+  $('start-ai').disabled = ['ready', 'loading'].includes(ai.state);
+  $('stop-ai').hidden = !['ready', 'loading'].includes(ai.state);
+  if (ai.state === 'loading') aiTimer = setTimeout(() => refreshAI().catch(error => notice(error.message)), 1500);
+}
+action($('run-investigation'), () => startInvestigation(currentCase));
+action($('stop-investigation'), async () => {
+  const report = displayedRun;
+  if (!report) return;
+  await api('/api/stop', {case: report.case_id, run_id: report.run_id});
+  notice('Stopping after current request. Collected sources remain saved.');
+});
+action($('start-ai'), async () => { await api('/api/ai/start', {}); await refreshAI(); });
+action($('stop-ai'), async () => { await api('/api/ai/stop', {}); await refreshAI(); });

@@ -8,7 +8,7 @@ import ipaddress
 import socket
 import ssl
 import time
-from urllib.parse import urlencode, urlsplit, urlunsplit
+from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 
 from .engine import InvalidInput, MAX_BYTES
 
@@ -102,8 +102,10 @@ def fetch_public(url, allow_query=False):
     try:
         connection.request("GET", path, headers={"User-Agent": "LocalOSINT/0.1 (single-page public evidence collection)", "Accept": "text/html, text/plain, application/json, text/csv", "Accept-Encoding": "identity"})
         response = connection.getresponse()
+        if response.status == 429:
+            raise InvalidInput('Source rate limited this request (HTTP 429). Try a later investigation.')
         if response.status != 200:
-            raise InvalidInput("Destination did not return HTTP 200. Redirects are not followed.")
+            raise InvalidInput(f"Destination returned HTTP {response.status}. Redirects are not followed.")
         if response.getheader("Content-Encoding", "identity").lower() != "identity":
             raise InvalidInput("Compressed responses are unsupported.")
         mime = response.getheader("Content-Type", "").split(";", 1)[0].strip().lower()
@@ -171,10 +173,11 @@ def research(engine, case_id, domain, signals, enabled=False):
                     raise InvalidInput("Registration service directory could not be read.") from exc
                 if not endpoints:
                     raise InvalidInput("No HTTPS registration service is listed for this domain suffix.")
-                raw, format, canonical = fetch_public(endpoints[0].rstrip("/") + "/domain/" + domain)
+                registration_domain = domain[4:] if domain.startswith('www.') else domain
+                raw, format, canonical = fetch_public(endpoints[0].rstrip("/") + "/domain/" + registration_domain)
                 if format != "json":
                     raise InvalidInput("Registration service did not return JSON.")
-                saved = engine.ingest(case_id, raw, generated_title("Registration: " + domain), canonical, "json")
+                saved = engine.ingest(case_id, raw, generated_title("Registration: " + registration_domain), canonical, "json")
             else:
                 host, address, _, _ = target("https://" + domain + "/")
                 if signal == "dns":
@@ -234,13 +237,13 @@ def discover(engine, case_id, sources, enabled=False, query=None):
                 if source == "wikipedia":
                     for item in payload["query"]["search"][:10]:
                         title = str(item["title"])
-                        candidates.append({"label": title, "description": re.sub(r"<[^>]*>", "", str(item.get("snippet", ""))), "url": "https://en.wikipedia.org/?curid=" + str(int(item["pageid"]))})
+                        candidates.append({"label": title[:300], "description": re.sub(r"<[^>]*>", "", str(item.get("snippet", "")))[:1000], "url": "https://en.wikipedia.org/?curid=" + str(int(item["pageid"])), "collection_url": "https://en.wikipedia.org/wiki/" + quote(title.replace(" ", "_"), safe="")})
                 else:
                     for item in payload["search"][:10]:
                         identifier = item["id"]
                         if not isinstance(identifier, str) or not re.fullmatch(r"Q[0-9]+", identifier):
                             continue
-                        candidates.append({"label": str(item.get("label", identifier)), "description": str(item.get("description", "")), "url": "https://www.wikidata.org/wiki/" + identifier})
+                        candidates.append({"label": str(item.get("label", identifier))[:300], "description": str(item.get("description", ""))[:1000], "url": "https://www.wikidata.org/wiki/" + identifier, "collection_url": "https://www.wikidata.org/wiki/Special:EntityData/" + identifier + ".json"})
             except (ValueError, KeyError, TypeError) as exc:
                 raise InvalidInput("Discovery response could not be interpreted.") from exc
             saved = engine.ingest(case_id, raw, generated_title("Discovery: " + query + " (" + source + ")"), canonical, "json")
@@ -248,3 +251,31 @@ def discover(engine, case_id, sources, enabled=False, query=None):
         except (InvalidInput, OSError, http.client.HTTPException) as exc:
             results.append({"source": source, "ok": False, "error": str(exc) if isinstance(exc, InvalidInput) else "Discovery failed. Check connectivity or TLS certificate validity."})
     return {"query": query, "focus_type": case["focus_type"], "interpretation": "Search results are candidates, not confirmed identities or relationships.", "results": results}
+
+
+def news(engine, case_id, query, enabled=False):
+    """Search recent public news metadata through the fixed GDELT DOC API."""
+    if not enabled:
+        raise InvalidInput("Collection is off. Restart with --allow-network to enable it.")
+    with engine.connection() as db:
+        engine.require_case(db, case_id)
+    from .engine import field
+    query = field(query, "News query", 200)
+    phrase = " ".join(query.replace('"', ' ').split())
+    params = {"query": '"' + phrase + '"', "mode": "artlist", "format": "json", "maxrecords": "8", "timespan": "3months", "sort": "datedesc"}
+    raw, format, canonical = fetch_public("https://api.gdeltproject.org/api/v2/doc/doc?" + urlencode(params), allow_query=True)
+    if format != "json":
+        raise InvalidInput("News source did not return JSON.")
+    try:
+        payload = json.loads(raw)
+        if not isinstance(payload, dict) or not isinstance(payload.get("articles"), list):
+            raise ValueError()
+        articles = []
+        for item in payload["articles"][:8]:
+            if not isinstance(item, dict) or not isinstance(item.get("url"), str):
+                continue
+            articles.append({key: str(item.get(key, ""))[:2000 if key == "url" else 1000] for key in ("url", "title", "seendate", "language", "sourcecountry")})
+    except (ValueError, TypeError) as exc:
+        raise InvalidInput("News response could not be interpreted.") from exc
+    saved = engine.ingest(case_id, raw, generated_title("News search: " + query), canonical, "json")
+    return {"articles": articles, **saved}

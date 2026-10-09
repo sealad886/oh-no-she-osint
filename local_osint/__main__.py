@@ -13,6 +13,7 @@ import webbrowser
 from .collector import collect, research, discover
 from .engine import Engine, InvalidInput, MAX_BYTES
 from .server import LocalServer
+from .investigation import Investigation
 
 
 def write_private(path, value):
@@ -25,11 +26,12 @@ def write_private(path, value):
 def parser():
     root = argparse.ArgumentParser(prog="osint", description="Private local evidence workspace. No network access unless explicitly enabled.")
     commands = root.add_subparsers(dest="command", required=True)
-    for name, help in [("serve", "Open the local browser workspace"), ("case", "Create a case"), ("cases", "List cases"), ("import", "Import UTF-8 evidence"), ("search", "Search a case"), ("entity", "Inspect an indicator and shared sources"), ("export", "Export a case to a new private file"), ("discover", "Discover public-source candidates for a person, organization or topic"), ("research", "Collect public DNS, registration, TLS and website signals for a domain"), ("fetch", "Collect one public HTTPS page"), ("backup", "Create an integrity-checked database backup")]:
+    for name, help in [("serve", "Open the local browser workspace"), ("case", "Create a case"), ("cases", "List cases"), ("import", "Import UTF-8 evidence"), ("search", "Search a case"), ("entity", "Inspect an indicator and shared sources"), ("export", "Export a case to a new private file"), ("discover", "Discover public-source candidates for a person, organization or topic"), ("research", "Collect public DNS, registration, TLS and website signals for a domain"), ("fetch", "Collect one public HTTPS page"), ("investigate", "Automatically collect a subject dossier"), ("backup", "Create an integrity-checked database backup")]:
         sub = commands.add_parser(name, help=help)
         sub.add_argument("--data-dir", help="Private data directory (default: .local-osint)")
         sub.add_argument("--config", type=Path, help="Optional TOML file with data_dir and port")
         if name == "serve":
+            sub.add_argument("--model", type=Path, help="Optional local GGUF for click-to-start llama.cpp; no download")
             sub.add_argument("--port", type=int, help="Local port (default: automatic; 0 chooses a free port)")
             sub.add_argument("--allow-network", action="store_true", help="Permit explicitly requested public signal collection")
             sub.add_argument("--offline", dest="allow_network", action="store_false", help="Disable every collection operation")
@@ -45,7 +47,7 @@ def parser():
             sub.add_argument("--title")
             sub.add_argument("--source", help="Evidence source label; defaults to basename")
             sub.add_argument("--format", choices=["text", "html", "json", "csv"], help="Override format inferred from extension")
-        elif name in {"search", "entity", "export", "fetch", "research", "discover"}:
+        elif name in {"search", "entity", "export", "fetch", "research", "discover", "investigate"}:
             sub.add_argument("case_id")
             if name == "search":
                 sub.add_argument("query", nargs="?", default="")
@@ -55,6 +57,8 @@ def parser():
             elif name == "export":
                 sub.add_argument("file", type=Path)
                 sub.add_argument("--format", choices=["json", "markdown"], default="json")
+            elif name == "investigate":
+                sub.add_argument("--allow-network", action="store_true", required=True)
             elif name == "discover":
                 sub.add_argument("--query", help="Optional query, such as a known alias; defaults to subject name")
                 sub.add_argument("--sources", nargs="+", choices=["wikipedia", "wikidata"], default=["wikipedia", "wikidata"])
@@ -99,7 +103,7 @@ def main(argv=None):
         directory, port = settings(args)
         engine = Engine(directory)
         if args.command == "serve":
-            with LocalServer(engine, port, args.allow_network) as server:
+            with LocalServer(engine, port, args.allow_network, args.model) as server:
                 link = server.origin + "/#token=" + server.token
                 print("Local OSINT ready. " + ("Public HTTPS collection enabled." if args.allow_network else "Offline mode; web collection disabled."), flush=True)
                 print("Private launch link (keep it on this machine): " + link, flush=True)
@@ -124,6 +128,10 @@ def main(argv=None):
             result = engine.view(args.case_id, args.query, args.kind)
         elif args.command == "entity":
             result = engine.entity(args.case_id, args.entity_id)
+        elif args.command == "investigate":
+            result = Investigation(engine, args.case_id, args.allow_network).run()
+            print(json.dumps(result, indent=2, ensure_ascii=True))
+            return 0 if result["status"] in {"complete", "partial"} else 1
         elif args.command == "discover":
             result = discover(engine, args.case_id, args.sources, args.allow_network, args.query)
             print(json.dumps(result, indent=2, ensure_ascii=True))

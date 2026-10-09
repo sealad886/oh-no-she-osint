@@ -264,11 +264,13 @@ class Engine:
             raise InvalidInput("Case not found. Choose an existing case.")
         return Engine.case_record(case)
 
-    def ingest(self, case_id, raw, title, source="Imported file", format="text"):
+    def ingest(self, case_id, raw, title, source="Imported file", format="text", extract=True):
         title = field(title, "Evidence title")
         source = field(source, "Source", 2000)
+        if source.startswith('local-osint:') and extract:
+            raise InvalidInput('This source prefix is reserved for generated local reports.')
         text = searchable_text(raw, format)
-        found = indicators(text)
+        found = indicators(text) if extract else []
         digest = hashlib.sha256(raw).hexdigest()
         with self.connection() as db:
             self.require_case(db, case_id)
@@ -344,15 +346,57 @@ class Engine:
                 evidence.append(item)
             entities = [dict(x) for x in db.execute("SELECT * FROM entities WHERE case_id=? ORDER BY kind,value", (case_id,))]
             mentions = [dict(x) for x in db.execute("SELECT m.* FROM mentions m JOIN evidence e ON m.evidence_id=e.id WHERE e.case_id=? ORDER BY m.evidence_id,m.start", (case_id,))]
+        reports = [json.loads(item['text']) for item in evidence if item['source'] == 'local-osint:investigation-report']
         return {"schema_version": 1, "exported_at": now(), "case": case, "evidence": evidence, "entities": entities, "mentions": mentions,
+                "investigation": reports[-1] if reports else None,
                 "interpretation": "Indicators are extracted mentions. Shared sources do not establish ownership or identity."}
+
+    def latest_investigation(self, case_id):
+        with self.connection() as db:
+            self.require_case(db, case_id)
+            row = db.execute("SELECT id,raw FROM evidence WHERE case_id=? AND source='local-osint:investigation-report' ORDER BY collected_at DESC LIMIT 1", (case_id,)).fetchone()
+            if not row:
+                return None
+            try:
+                result = json.loads(row["raw"])
+                if not isinstance(result, dict) or result.get("report_type") != "investigation" or result.get("case_id") != case_id:
+                    raise ValueError()
+            except (ValueError, TypeError) as exc:
+                raise InvalidInput("Saved investigation report could not be read.") from exc
+            return {**result, "report_id": row["id"]}
 
     def markdown(self, case_id):
         data = self.export(case_id)
         # Escape user content so a Markdown viewer cannot execute raw HTML or create links/images.
         def escape(value):
             return re.sub(r"([\\`*_{}\[\]()#+.!|>~-])", r"\\\1", value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")).replace("\n", " ")
-        lines = ["# " + escape(data["case"]["name"]), "", "Focus: " + data["case"]["focus_type"], "", "Aliases: " + escape(", ".join(data["case"]["aliases"])), "", "Known identifiers (user supplied): " + escape(", ".join(data["case"]["identifiers"])), "", data["interpretation"], "", "## Indicators", ""]
+        lines = ["# " + escape(data["case"]["name"]), "", "Focus: " + data["case"]["focus_type"], "", "Aliases: " + escape(", ".join(data["case"]["aliases"])), "", "Known identifiers (user supplied): " + escape(", ".join(data["case"]["identifiers"])), "", data["interpretation"], ""]
+        report = data['investigation']
+        if report:
+            lines.extend(['## Investigation dossier', '', 'Status: ' + escape(report['status']), '', escape(report['interpretation']), ''])
+            for profile in report['profiles']:
+                lines.extend(['### Unconfirmed candidate: ' + escape(profile['label']), '', escape(profile['description']), '', 'Candidate ID: ' + escape(profile['candidate_id']), '', 'Evidence ID: ' + escape(profile['source_id']), ''])
+                for claim in profile['claims']:
+                    context = '; '.join(q['label'] + ': ' + q['value'] for q in claim.get('qualifiers', []))
+                    lines.append('- ' + escape(claim['label']) + ': ' + escape(claim['value']) + ' (' + escape(claim.get('rank', 'normal')) + ' statement' + ('; ' + escape(context) if context else '') + ') [evidence ' + escape(claim['source_id']) + ']')
+                    if claim.get('qualifiers_truncated'):
+                        lines.append('  More qualifiers in original source')
+                    if claim.get('label_source_id'):
+                        lines.append('  Label evidence: ' + escape(claim['label_source_id']))
+                lines.append('')
+            if report['articles']:
+                lines.extend(['### Recent news mentions', ''])
+                for article in report['articles']:
+                    lines.extend(['- ' + escape(article['title']), '  URL: ' + escape(article['url']), '  Evidence ID: ' + escape(article.get('page_source_id', article['source_id'])), ''])
+            if report.get('ai'):
+                lines.extend(['### Local AI draft - unverified', '', escape(report['ai'].get('summary') or report['ai'].get('error', 'No draft available.')), ''])
+                if report['ai'].get('status') == 'truncated':
+                    lines.extend(['Incomplete: AI draft reached its output limit.', ''])
+            lines.extend(['### Collection log', ''])
+            for step in report['steps']:
+                lines.append('- ' + ('Collected: ' if step['ok'] else 'Unavailable: ') + escape(step['label']) + ('; ' + escape(step['error']) if step.get('error') else ''))
+            lines.append('')
+        lines.extend(['## Indicators', ''])
         for entity in data["entities"]:
             lines.append(f"- {entity['kind']}: {escape(entity['value'])}")
         lines.extend(["", "## Evidence", ""])

@@ -5,6 +5,8 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
+import time
+from unittest.mock import patch
 
 from local_osint.engine import Engine
 from local_osint.server import LocalServer, MAX_REQUEST
@@ -52,7 +54,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(status, 401)
 
     def test_authentication_required_for_private_data(self):
-        for path in ['/api/status', '/api/cases', '/api/view?case=x', '/api/evidence?case=x&id=y', '/api/export?case=x', '/api/entity?case=x&id=y']:
+        for path in ['/api/status', '/api/cases', '/api/view?case=x', '/api/evidence?case=x&id=y', '/api/export?case=x', '/api/entity?case=x&id=y', '/api/investigation?case=x', '/api/ai']:
             with self.subTest(path=path):
                 self.assertEqual(self.request(path, authenticated=False)[0], 401)
         self.assertEqual(self.request('/api/cases', headers={'X-OSINT-Local':''})[0], 401)
@@ -104,8 +106,41 @@ class ServerTests(unittest.TestCase):
 
     def test_offline_status_and_all_network_endpoints(self):
         self.assertFalse(self.request('/api/status')[2]['network'])
-        for path, data in [('/api/collect', {'url':'https://example.org/'}), ('/api/research', {'domain':'example.org','signals':['dns']}), ('/api/discover', {'sources':['wikipedia']})]:
+        for path, data in [('/api/collect', {'url':'https://example.org/'}), ('/api/research', {'domain':'example.org','signals':['dns']}), ('/api/discover', {'sources':['wikipedia']}), ('/api/investigate', {'case':'missing'})]:
             self.assertEqual(self.request(path, data)[0], 400)
+
+    def test_automatic_job_api_is_authenticated_and_case_scoped(self):
+        self.server.jobs.enabled = True
+        case = self.request('/api/cases', {'name': 'Ada Lovelace', 'focus_type': 'person'})[2]
+        def public(url, allow_query=False):
+            if 'wikipedia' in url:
+                return b'{"query":{"search":[]}}', 'json', url
+            if 'wikidata' in url:
+                return b'{"search":[]}', 'json', url
+            return b'{"articles":[]}', 'json', url
+        with patch('local_osint.collector.fetch_public', side_effect=public):
+            self.assertEqual(self.request('/api/investigate', {'case': case['id']}, authenticated=False)[0], 401)
+            response = self.request('/api/investigate', {'case': case['id']})
+            self.assertEqual(response[0], 202)
+            for _ in range(100):
+                report = self.request('/api/investigation?case=' + case['id'])[2]
+                if report['status'] != 'running':
+                    break
+                time.sleep(.01)
+            self.assertEqual(report['status'], 'complete')
+            self.assertEqual(report['case_id'], case['id'])
+            self.assertEqual(len(report['source_ids']), 3)
+        self.assertEqual(self.request('/api/stop', {'case': 'other', 'run_id': report['run_id']})[0], 400)
+        exported = self.request('/api/export?case=' + case['id'])[2]
+        self.assertEqual(exported['investigation']['run_id'], report['run_id'])
+
+    def test_ai_start_uses_only_server_configuration(self):
+        with patch.object(self.server.ai, 'start', return_value={'state': 'loading'}) as start:
+            self.assertEqual(self.request('/api/ai/start', {}, authenticated=False)[0], 401)
+            self.assertEqual(self.request('/api/ai/start', {'model': '/some/arbitrary/path', 'endpoint': 'https://remote.example'})[0], 202)
+            start.assert_called_once_with()
+        case = self.engine.create_case('Sample')
+        self.assertEqual(self.request('/api/investigate', {'case': case['id'], 'ai': True})[0], 400)
 
 
 if __name__ == '__main__':

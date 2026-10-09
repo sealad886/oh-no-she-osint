@@ -2,9 +2,9 @@
 
 A private OSINT workspace focused on **people, organizations, domains, topics or
 other subjects**. Collect public signals online; store evidence, extract indicators,
-search and write reports entirely on your machine.
+search and write dossiers entirely on your machine. Enter a subject and press **Start investigation**; the app collects evidence for you.
 
-No accounts, API keys, cloud database, analytics, AI service, external fonts or
+No accounts, API keys, cloud database, analytics, cloud AI service, external fonts or
 runtime dependencies. Open source under the [MIT license](LICENSE).
 
 ## Start
@@ -38,35 +38,81 @@ To disable external collection, including DNS:
 
 ## First investigation
 
-1. **Create a case.** Choose person, organization, domain, topic/event or other.
-   Add a subject name, optional aliases and known identifiers such as a public
-   profile URL, domain or email. These identifiers remain user-supplied leads.
-2. **Find public-source candidates.** Search Wikipedia and Wikidata for the
-   name or an alias. Inspect labels and descriptions. Collect a candidate page
-   only when you want it as evidence. A matching name is never proof of identity.
-3. **Collect known signals.** For a relevant domain, select DNS addresses,
-   registration data, TLS certificate or the public website. Or collect a specific
-   public HTTPS page. A source failure leaves successful evidence intact.
-4. **Bring your own evidence.** Import UTF-8 text, Markdown, HTML, JSON or CSV,
-   or paste notes. Binary files and PDFs need conversion first. Each item is
-   limited to 2 MiB. [Fictional sample evidence](examples/sample.txt) is included.
-5. **Follow indicators.** Search and filter emails, domains, URLs, IPv4 and IPv6.
-   Click an indicator to inspect its sources and other indicators in those sources.
-   Evidence displays as text; saved HTML cannot run scripts or load images.
-6. **Export.** Download a readable Markdown report or complete JSON evidence
-   export, including original bytes, SHA-256 fingerprints, timestamps, subject
-   metadata and indicator mentions.
+1. Click **Start your first investigation** or **New case**. Choose a person,
+   organization, domain or topic, and enter its name. Aliases and public identifiers
+   are optional; adding a known website can improve relevance.
+2. Press **Start investigation**. The app searches Wikipedia/Wikidata, collects
+   candidate profiles and relationship claims, resolves names, collects a Wikipedia
+   page, searches recent GDELT news and follows up to two articles. It also collects
+   DNS, registration, TLS and website evidence for one supplied or candidate domain.
+3. Read the dossier while progress updates. Candidates remain unconfirmed: a shared
+   name is not proof of identity. Each profile, claim and news item keeps evidence
+   references. **Collection log** explains unavailable sources. **Stop** retains
+   sources already saved and stops before the next request.
+   Wikidata claims preserve statement rank, qualifiers, date precision and calendar;
+   deprecated claims are excluded and ended website claims are not followed.
+4. Optionally open **Local AI**, click **Start local AI**, wait for Ready and enable
+   **Add AI analysis to next run**. Then run the investigation again. AI reads the
+   sources, uses bounded tools and drafts a summary locally.
+5. Inspect indicators and original sources below the dossier. Advanced sections let
+   you search an alias, collect another known public page or import your own evidence.
+6. Export a readable Markdown dossier or complete JSON export with originals,
+   fingerprints, timestamps, subject metadata, run history and source references.
 
-Discovery covers public encyclopedic sources, not the whole web. For subjects
-absent from those sources, collect known public URLs or import public records.
-There is no social-account enumeration, hidden-profile access, people-search broker,
-facial recognition, identity attribution, bulk crawling or automated risk scoring.
+An investigation uses at most 24 collection request units and a 180-second soft
+collection deadline. One run at a time. Requests in flight finish before cancellation;
+OS DNS follows the OS timeout policy. Restart marks unfinished runs **interrupted**
+and keeps collected evidence; it never automatically resumes outbound collection.
+A partial result is useful evidence, not complete coverage. News rate limits,
+redirects and blocked sites appear as source failures.
+
+Coverage begins with public encyclopedic sources and recent news. Subjects absent
+from those sources may need an alias or known public identifier. No social-account
+enumeration, login-required scraping, people-search brokers, facial recognition,
+identity attribution, vulnerability scanning or unrestricted crawling.
+
+## Optional local AI
+
+Install [llama.cpp](https://github.com/ggml-org/llama.cpp) and download the model once:
+
+```sh
+hf download terrorswift/REDCELL-26B-A4B-OSINT-Cyber-APEX-GGUF --include '*I-Compact.gguf'
+```
+
+The app detects the cached exact I-Compact GGUF (about 14.7 GB). No automatic model
+or package downloads occur when investigating or starting AI. For another local
+GGUF, launch with `./start.sh --model /absolute/path/to/model.gguf`. The model must
+support tool calling; REDCELL I-Compact was tested with the installed llama.cpp.
+
+**Start local AI** owns a separate authenticated loopback llama-server process.
+No shell commands, arbitrary files or remote AI endpoints are exposed to the model.
+The app provides these tools; you do not need to install an extra tool server:
+
+| Tool | Capability |
+| --- | --- |
+| `search_subject` | Read this run's public candidate search results |
+| `news_search` | Read this run's recent news search results |
+| `collect_page` | Collect a URL already found for this investigation |
+| `domain_signals` | Collect an approved domain's public records |
+| `read_evidence` | Read a collected source from this run |
+
+Search tools reuse collected results. The model cannot transmit new free-form
+queries, fetch invented URLs, access other cases or execute commands. Up to four
+model turns and six tool calls; 512 generated tokens per turn. AI drafts can be
+wrong and remain labelled unverified. An evidence read is required before drafting
+when sources exist. Source references let you check the result. Token-limited
+drafts are explicitly marked incomplete and retained for inspection.
+**Stop local AI** or stopping the app shuts down only its owned model process.
+Initial loading can take a minute and requires enough free memory. External model
+servers and unrelated llama.cpp sessions are left alone.
 
 ## Collection and privacy
 
 | Source | Collected signal | What goes outside your machine |
 | --- | --- | --- |
-| Wikipedia / Wikidata | Up to 10 candidates per selected source | Your name/search query and source request |
+| Wikipedia / Wikidata | Candidates, profiles, relationship labels and a page | Subject name or first alias; selected public IDs and page requests |
+| GDELT / linked news sites | Up to 8 recent mentions; up to 2 article pages | Quoted subject name; selected article requests |
+| Local llama.cpp (optional) | Tool calls and draft summary | Nothing: authenticated loopback; cached model only |
 | OS DNS resolver | A/AAAA address results | Requested domain |
 | IANA + domain registry | RDAP registration response | Registry sees requested domain; IANA sees bootstrap request |
 | Domain TLS endpoint | Verified certificate and DER bytes | Requested hostname and connection |
@@ -75,15 +121,13 @@ facial recognition, identity attribution, bulk crawling or automated risk scorin
 Destination services can see your public IP address. System DNS behavior depends
 on your OS/network. Local processing is private; network collection is observable.
 There are no credentials or cookies sent to providers, no proxy environment use,
-no automatic retries, and no crawling of discovered links. Requests have size and
+no automatic retries, and only bounded follow-up of discovered profiles and article links. Requests have size and
 socket timeout limits. OS DNS resolution has the OS's timeout policy.
 
 Collection permits public HTTPS on port 443. Private/special-use addresses,
 credentials in URLs and redirects are blocked. User page URLs must not include
-query parameters or fragments; built-in discovery creates its own narrowly scoped
-provider query. Some sites require redirects, login, JavaScript or different
-encodings and will be unavailable. The app reports that failure rather than
-silently changing its security boundary.
+query parameters or fragments; built-in provider searches create narrowly scoped query parameters. Some sites require redirects, login, JavaScript or different
+encodings and will be unavailable. The app reports that failure. Registration strips a leading `www.` from the website host; other subdomains can lack registration records. Candidate HTTP website claims may be attempted over HTTPS, with normal certificate verification.
 
 See [security and privacy](SECURITY.md) for controls, assumptions and limits.
 
@@ -133,6 +177,7 @@ Copy the returned case ID into the following commands:
 
 ```sh
 .venv/bin/python -m local_osint import CASE_ID examples/sample.txt
+.venv/bin/python -m local_osint investigate CASE_ID --allow-network
 .venv/bin/python -m local_osint discover CASE_ID --allow-network
 .venv/bin/python -m local_osint discover CASE_ID --query "Known alias" \
   --sources wikidata --allow-network
@@ -147,8 +192,9 @@ Copy the returned case ID into the following commands:
 ```
 
 Each command accepts `--data-dir` and `--config`. CLI output is JSON; errors go to
-stderr. Discovery/research exits nonzero if any requested source fails, preserving
-successful source evidence. Export and backup never overwrite existing files.
+stderr. Investigation exits zero for complete or partial results; inspect its
+status and collection log. Discovery/research exits nonzero if any requested source
+fails, preserving successful evidence. Export and backup never overwrite existing files.
 CLI output files have owner-only permissions; browser download permissions are
 controlled by your browser and OS.
 
