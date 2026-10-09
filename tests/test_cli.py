@@ -1,9 +1,11 @@
 from contextlib import redirect_stdout, redirect_stderr
 import io
+import errno
 import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from local_osint.__main__ import main, parser, settings
 
@@ -50,6 +52,21 @@ class CLITests(unittest.TestCase):
         for content in ['allow_network=true', 'port=true', 'port=70000', 'data_dir=123', 'bad TOML']:
             config.write_text(content)
             self.assertEqual(self.run_command(['cases','--config',str(config)])[0], 1)
+
+    def test_default_port_is_automatic_but_explicit_port_is_respected(self):
+        args = parser().parse_args(['serve'])
+        self.assertEqual(settings(args)[1], 0)
+        args = parser().parse_args(['serve', '--port', '8765'])
+        self.assertEqual(settings(args)[1], 8765)
+
+    def test_explicit_busy_port_has_actionable_error(self):
+        with patch('local_osint.__main__.LocalServer', side_effect=OSError(errno.EADDRINUSE, 'private diagnostic')):
+            code, out, err = self.run_command(['serve', '--port', '8765'])
+        self.assertEqual(code, 1)
+        self.assertIn('--port 0', err)
+        self.assertIn('8765', err)
+        self.assertNotIn('private diagnostic', err)
+        self.assertNotIn('ready', out)
 
     def test_output_escapes_terminal_control_characters(self):
         code, out, _ = self.run_command(['case', '\x1b[31mName'])

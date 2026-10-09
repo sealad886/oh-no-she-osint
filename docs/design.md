@@ -104,3 +104,10 @@ WI-1 through WI-4 implementation, documentation and local verification are compl
 Six live provider checks and the actual person/organization browser workflow passed.
 See [validation evidence](validation.md) for exact scope and untested surfaces.
 External PR/review/CI/release delivery remains blocked by the missing remote.
+
+Canonical startup repair: the CLI now selects a free loopback port by default.
+Explicit configured/requested ports are honored and report occupied-port recovery
+instructions. Real fresh-environment launcher tests cover browser-link handoff and
+session authentication. See validation evidence for the observed default-port
+collision and repaired canonical startup; the original 42-test snapshot above is
+historical, and current suite has 46 tests.

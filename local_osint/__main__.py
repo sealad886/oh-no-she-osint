@@ -1,6 +1,7 @@
 """Browser launcher and scriptable evidence workflow."""
 
 import argparse
+import errno
 import json
 import os
 from pathlib import Path
@@ -29,7 +30,7 @@ def parser():
         sub.add_argument("--data-dir", help="Private data directory (default: .local-osint)")
         sub.add_argument("--config", type=Path, help="Optional TOML file with data_dir and port")
         if name == "serve":
-            sub.add_argument("--port", type=int, help="Local port (default: 8765; 0 chooses a free port)")
+            sub.add_argument("--port", type=int, help="Local port (default: automatic; 0 chooses a free port)")
             sub.add_argument("--allow-network", action="store_true", help="Permit explicitly requested public signal collection")
             sub.add_argument("--offline", dest="allow_network", action="store_false", help="Disable every collection operation")
             sub.add_argument("--open", action="store_true", help="Open browser automatically")
@@ -86,7 +87,7 @@ def settings(args):
             config["data_dir"] = str(args.config.absolute().parent / Path(config["data_dir"]).expanduser())
     directory = args.data_dir or config.get("data_dir", ".local-osint")
     port = getattr(args, "port", None)
-    port = config.get("port", 8765) if port is None else port
+    port = config.get("port", 0) if port is None else port
     if type(port) is not int or not 0 <= port <= 65535:
         raise InvalidInput("Port must be an integer from 0 to 65535.")
     return directory, port
@@ -143,7 +144,10 @@ def main(argv=None):
         return 0
     except (InvalidInput, OSError, sqlite3.Error) as exc:
         # Filesystem errors can include private paths; use a fixed message for those.
-        message = str(exc) if isinstance(exc, InvalidInput) else "Local operation failed. Check permissions, disk space, file existence and port availability. Existing files are never overwritten."
+        if isinstance(exc, OSError) and exc.errno == errno.EADDRINUSE and args.command == "serve":
+            message = f"Local port {port} is already in use. Run with --port 0 to choose a free port."
+        else:
+            message = str(exc) if isinstance(exc, InvalidInput) else "Local operation failed. Check permissions, disk space, file existence and port availability. Existing files are never overwritten."
         print("Error: " + message, file=sys.stderr)
         return 1
 

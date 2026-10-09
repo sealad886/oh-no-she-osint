@@ -16,8 +16,8 @@ Install Python 3.11 or newer. From this project directory:
 ```
 
 The launcher creates a project-only virtual environment if needed, starts the app
-on `127.0.0.1:8765`, and opens a private browser launch link. Nothing goes online
-until you request a collection. Keep that link private. Stop with **Ctrl+C**;
+on `127.0.0.1` using a free port, and opens a private browser launch link. Nothing
+goes online until you request a collection. Keep that link private. Stop with **Ctrl+C**;
 your cases remain on disk.
 
 For Windows, or without the launcher:
@@ -92,7 +92,7 @@ See [security and privacy](SECURITY.md) for controls, assumptions and limits.
 The UI needs no configuration file or API keys. Useful launcher options:
 
 ```sh
-./start.sh --port 0                         # choose a free port
+./start.sh --port 9000                      # request a specific free port
 ./start.sh --data-dir ./private-cases       # choose private local storage
 ./start.sh --offline                       # prohibit collection
 ```
@@ -106,7 +106,7 @@ Optional `osint.toml`:
 
 ```toml
 data_dir = "private-cases"
-port = 8765
+port = 0 # automatically choose a free local port
 ```
 
 ```sh
@@ -114,7 +114,9 @@ port = 8765
 ```
 
 Relative `data_dir` paths in TOML resolve beside that file. Explicit command options
-win. Unknown keys or invalid ports fail visibly. Network permission is a launch
+win. With no port configured, the OS selects a free port. An explicitly requested
+busy port fails with an actionable error; use `--port 0` to select a free port.
+Unknown keys or invalid ports fail visibly. Network permission is a launch
 flag, not a persisted preference. `--offline` disables it for that launch.
 
 ## CLI

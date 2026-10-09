@@ -6,8 +6,11 @@ No user acceptance or exhaustive security certification is claimed.
 
 ## Behavioral checks
 
-42 standard-library unittest cases pass, including:
+46 standard-library unittest cases pass, including:
 
+- Canonical launcher bootstrap in a fresh project with spaces, browser-link
+  handoff and authenticated loopback session, automatic default port, explicit
+  occupied-port errors and offline override.
 - Typed subjects, aliases, known identifiers, isolation and restart persistence.
 - All four import formats, original-byte hashes, deduplication under concurrent
   imports, source offsets, literal searches and complete export.
@@ -92,3 +95,46 @@ multiple Python versions, Windows ACL behavior and unattended service deployment
 are not validated. There is no configured Git remote. External PR/CI/release checks
 cannot run until an existing repository identity is supplied. Local review and
 verification do not count as remote CI, publication or user acceptance.
+
+## Canonical launcher repair, 2026-10-09
+
+User reported `./start.sh` exiting with the generic local-operation error. The exact
+command reproduced exit 1 because another local application occupied port 8765.
+Earlier preview validation selected random ports and the launcher check only used
+`--help`, so it missed the documented default startup path.
+
+CLI settings now request port 0 by default, letting the OS select a free loopback
+port. Explicit TOML/command ports retain their intended meaning. An explicit busy
+port reports the port number and recommends `--port 0`; unrelated listeners are
+never stopped. Storage, permission checks, authentication and loopback binding are
+unchanged. No data/config migration is needed; configured fixed ports are explicit
+user choices. Rollback is the bounded source change, not a database operation.
+
+Two new CLI regressions failed before the repair and pass afterward. Two launcher
+integration tests execute the real script, create fresh project virtual environments
+without package downloads, exercise paths with spaces and a different working
+directory, capture browser handoff through a local test helper, unlock the session,
+and verify explicit occupied-port failure plus offline override. Each test owns and
+cleans up its temporary process and data. These tests do not open an actual GUI.
+
+The repaired canonical `./start.sh` also ran in the user's actual checkout and
+started on port 51256 while the existing port-8765 service remained running. The
+actual in-app browser displayed the unlocked empty workspace and no console
+warnings/errors. Existing user environment/evidence was preserved. All 46 tests,
+Python compilation, shell syntax and diff whitespace checks pass. Graphify refreshed
+to 239 nodes, 518 edges, 15 communities.
+
+Delivery route: small-feature-change, small scale, low risk, change authority.
+Required context/acceptance/implementation/quality owners reused the existing design
+and evidence. Design, documentation, security/operations and independent review
+activate for the changed startup contract and its local privacy boundary. Planning,
+release and external coordination are not applicable to this bounded local repair.
+Retrospective activates from the observed escaped launcher failure: future startup
+claims must execute the canonical command and authenticate its resulting session,
+not substitute a random-port preview or `--help` check.
+
+Independent launcher-fix review returned clean against base `35de2f3` and snapshot
+`46710cd40d80fa726ee5e0d013fd8bd29b3589727f825e44ee9cc9bde5fba919`.
+The reviewer independently reran all 46 tests in 6.103 seconds. This replaces the
+original launcher acceptance gap; the earlier full-engine review remains historical
+evidence for its separately frozen snapshot. No publication or remote CI occurred.
