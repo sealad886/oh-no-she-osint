@@ -313,3 +313,75 @@ Retrospective outcome: public-web collection, native tool use and operator recov
 are separate acceptance claims. Future changes must exercise an ordinary subject,
 inspect actual tool inputs/failures, and prove a single edited retry, rather than
 treating an encyclopedia hit, server launch or progress counter as product acceptance.
+
+
+## Local case comparison and useful-page correction — 2026-10-10
+
+The accepted delta uses saved case details locally, distinguishes corroborated
+leads from name-only candidates, excludes login/empty/unrelated pages from the
+useful goal, continues bounded public search, and starts/uses the optional local
+LLM. Original cases and source evidence were retained; no schema migration,
+dependency install, model download or external publication was needed.
+
+Behavioral verification passed **128 tests in 5.407 seconds**, with loopback tests
+outside the sandbox. New contracts cover local contact/context ranking without
+copying clue values, exact query-selected profile identity, strict no-tool model
+comparison output, private model context without public vocabulary expansion,
+public-result-derived refinements with private phrase rejection, saved shell
+retention and continued useful collection, model echo redaction, and useful/match
+metadata in safe exports. A transient launcher fixture failure was a race between
+creating and writing the browser-handoff file; its reader now waits for nonempty
+content. Canonical launcher behavior was unchanged. Python compilation, JavaScript
+syntax, shell syntax and diff checks passed. SQLite resource warnings appeared in
+full-suite runs without failures; their broader lifecycle investigation is deferred.
+
+Independent review established three bounded defects in an interim candidate:
+query-selected profiles could compare equal by host/path, rejected model tool
+activity could retain private prompt echoes, and an AI-reserved page slot could
+stop useful collection early. Repairs preserve query/fragment URL identity, redact
+blocked activity and timeout traces, and fill the full useful goal before drafting.
+The repaired snapshot
+`8477a863adc44df7be7408fcddf2b3fe1223050b18a7feec88e9fc9d9dd4dd5a`
+returned no material in-scope P0/P1/P2 finding, with **128 tests independently passed
+in 5.265 seconds**. Independent normal/timeout fixtures made zero outbound calls
+for rejected private queries; an AI-enabled fixture kept good/shell/next originals
+and reached its useful goal before analysis. Hash stayed unchanged through review.
+Final documentation receipts were appended afterward; source/tests remained frozen.
+This is bounded source/synthetic evidence, not exhaustive security certification.
+
+Actual native validation started the cached REDCELL I-Compact GGUF through the
+app's owned authenticated loopback llama.cpp control. The final Eric run
+`a4a36ec4905b4c4292f53369c1cd912b` ran from 14:46:41 to 14:47:32 UTC, approximately
+51.292 seconds. Local comparison completed for eight leads; all remained uncertain,
+with no saved-clue corroboration. Collection continued beyond the prior nine-unit
+stop to **17 of 24 units**, retaining **10 raw pages** and reaching **four readable
+name-only candidate pages**. Six saved pages were excluded from the useful goal,
+including a Facebook login wall, Instagram shell and unrelated institutional/broker
+content. These counts measure readable candidate pages, not distinct identities or
+proof that the candidates are the target.
+
+The model made successful real `web_search` and `read_evidence` calls, using the
+observed public query `"Eric Mulhall" Dublin LinkedIn`, then produced a cited local
+draft with `status=draft`, `finish_reason=stop` and two known run evidence IDs.
+Model comparison and drafting received saved context locally. No literal saved
+private clue appeared in the observed model trace or tool activity; query policy
+and synthetic tests provide the separate outbound-boundary evidence. No packet
+capture or general anonymization claim is made. Overall status remained partial:
+three LinkedIn attempts returned HTTP 999 and Harvard returned HTTP 403. Those
+failures remain visible and individually editable/retryable. The target Eric's
+identity remains unconfirmed; academic biographies stay candidate evidence and
+are not merged into verified subject claims.
+
+An earlier native attempt completed private comparison but rejected a model query
+using public employer/location words. That attempt's AI draft remained failed;
+it is not a completed-draft receipt. Returned public titles/snippets now supply
+nonnumeric query vocabulary, while exact/normalized saved private clues remain
+blocked unless the user explicitly supplied them in public query/context.
+
+Browser verification showed local AI ready, enabled AI analysis, completed useful
+count, actual model-requested search/read inputs and edit/retry controls. Final
+console check had no warnings/errors. The proof screenshot excludes the private
+case header. The app and owned model remain running for the user. Provider blocking,
+unrendered JavaScript pages, heuristic quality decisions, namesake ambiguity and
+model paraphrases/inferences remain bounded limitations. Original saved case fields
+and user-requested case exports intentionally retain their private data.

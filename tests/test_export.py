@@ -21,11 +21,15 @@ class InvestigationExportTests(unittest.TestCase):
                 'status': 'partial', 'interpretation': 'Name matches remain unconfirmed.',
                 'stop_reason': 'Selected sources finished. Search unavailable; retry this tool.',
                 'budget': {'used': 9, 'limit': 24}, 'profiles': [], 'articles': [],
+                'quality_count': 0, 'options': {'page_limit': 2},
                 'web_results': [{'title': 'Ordinary Person public profile', 'url': 'https://example.org/profile?id=3',
                     'snippet': 'Public employment information', 'reason': 'Name matched; identity unconfirmed.',
-                    'source_id': search, 'page_source_id': page}],
+                    'source_id': search, 'page_source_id': page,
+                    'local_match': {'level': 'name_only', 'summary': 'No saved clue corroborates this lead.',
+                                    'model_assessment': 'context_unlikely'}}],
                 'pages': [{'url': 'https://example.org/profile?id=3', 'final_url': 'https://example.org/bio',
                     'source_id': page, 'excerpt': 'Ordinary Person public biography',
+                    'useful': False, 'quality_reason': 'Unverified namesake; original retained.',
                     'links': [{'title': 'About this person', 'url': 'https://example.org/about'}]}],
                 'steps': [{'label': 'Search for Ordinary Person', 'tool': 'web_search', 'origin': 'user',
                     'status': 'failed', 'ok': False, 'arguments': {'query': 'Ordinary Person employer'},
@@ -42,7 +46,9 @@ class InvestigationExportTests(unittest.TestCase):
             for meaning in ['Selected sources finished', '9 of 24', 'limit, not a completion target',
                             'Public employment information', 'identity unconfirmed', search, page,
                             'Ordinary Person public biography', 'About this person', 'web_search',
-                            'Ordinary Person employer', 'Provider challenged this request', 'Local AI']:
+                            'Ordinary Person employer', 'Provider challenged this request', 'Local AI',
+                            '0 of goal 2', 'Useful candidate content: no', 'Unverified namesake',
+                            'No saved clue corroborates', 'context_unlikely']:
                 self.assertIn(meaning, readable)
             for url in ['https://example.org/profile?id=3', 'https://example.org/bio', 'https://example.org/about']:
                 self.assertIn(url, readable)

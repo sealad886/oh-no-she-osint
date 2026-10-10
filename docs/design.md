@@ -225,3 +225,55 @@ stop reasons and, when enabled, native local-model search/follow/read/drafting.
 Provider blocking and namesake uncertainty remain evidence limits, not hidden
 successes. See the current validation record for separate synthetic, provider,
 browser and model receipts.
+
+## Local case matching and useful evidence
+
+User correction: compare saved case details locally to distinguish namesakes,
+keep looking past login/empty shells, and start/use the optional local model.
+The prior public-name filter did not use private clues, and saved HTML bytes
+counted toward the page goal regardless of substantive content.
+
+Accepted behavior: private identifiers enter only deterministic local comparison
+and the owned authenticated loopback model prompt. They never expand public query
+vocabulary or become automatic search refinements. Direct contact/known-public-URL
+matches rank above context matches and name-only leads. Local model comparison
+adds an unverified context hint, never proof of identity. Model comparisons return
+bounded candidate indices/categories; raw private clue values are not persisted
+in derived reports or tool activity. Explicit public URL/domain leads retain their
+existing collection meaning.
+
+Visible-text quality rejects login barriers, challenge pages and empty shells from
+the useful-page goal, while retaining originals and quality reasons. A namesake
+flag with no direct identifier corroboration also does not fill that goal. Continue
+through ranked results, approved links and at most two public-only query refinements
+within existing request/time ceilings; report exhaustion honestly. Model drafting
+receives private case context locally and must explain uncertainty without echoing
+raw contact details. Historical immutable reports remain historical; no case/schema
+migration is needed. Rollback preserves all source evidence.
+
+Route remains medium-feature-change, medium scale, high privacy risk, change
+authority. Reuse context, acceptance, design, planning, implementation, quality,
+documentation, independent review and local release-disposition owners. Security
+activates at private-model/public-query boundaries; coordination remains not
+applicable; retrospective activates from the observed shell/name-only failure.
+Ready/design gates derive from this explicit user correction and canonical owners.
+The engine fills the full useful-page goal before model drafting, avoiding a reserved
+AI page slot that could falsely report exhaustion while eligible leads remained.
+Public search results can supply employer/location/topic words for model refinements;
+literal and normalized saved private clues remain blocked before dispatch. Known
+URL corroboration includes query/fragment identity, preventing different profiles
+on the same endpoint from becoming strong matches. Rejected model arguments and
+timeout traces use the same private-output guard as drafts.
+
+Checklist complete: inspect/accept delta; implement local ranking/page quality;
+behavioral and actual Eric/native validation; independent review and documentation.
+Focused local commit is the remaining handoff action. No publication or new worktree.
+Independent repaired snapshot passed 128 tests without a material in-scope finding.
+Native validation reached four readable name-only candidate pages, rejected six
+nonuseful saved pages, and completed local comparison/search/read/drafting. No saved
+clue corroborated those candidates; target identity remains unconfirmed.
+
+Retrospective: readable content and candidate identity are separate facts. Private
+context can guide local comparison without yielding corroboration. The engine must
+show that uncertainty, preserve barriers and continue eligible public work; neither
+an academic namesake biography nor a model draft proves the requested person's identity.

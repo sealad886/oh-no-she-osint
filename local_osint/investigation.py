@@ -12,6 +12,8 @@ from urllib.parse import urlencode, urlsplit, urljoin, urldefrag
 
 from . import collector
 from .engine import InvalidInput, now, field
+from .page_quality import assess_page
+from .relevance import local_match, rank_key, words
 
 REPORT_SOURCE = 'local-osint:investigation-report'
 PROPERTIES = {'P31': 'Type', 'P856': 'Official website (candidate claim)', 'P17': 'Country',
@@ -39,10 +41,6 @@ def options_for(case, values=None):
             raise InvalidInput(f'{name} must be a whole number from 1 to {maximum}.')
     field(result['query'] + (' ' + result['context'] if result['context'] else ''), 'Combined public query and context', 200)
     return result
-
-
-def words(value):
-    return re.findall(r'[^\W_]+', value.casefold(), re.UNICODE)
 
 
 class PageLinks(HTMLParser):
@@ -125,7 +123,7 @@ class Investigation:
                        'profiles': [], 'candidates': [], 'articles': [], 'source_ids': [],
                        'interpretation': 'Name matches are unconfirmed candidates. Claims below belong to each candidate, not automatically to your subject.'}
         self.report.update(options=self.options, web_results=[], pages=[], stop_reason=None,
-                           network_enabled=enabled,
+                           network_enabled=enabled, quality_count=0,
                            budget={'used': 0, 'limit': self.options['max_requests']})
         if previous:
             self.report['parent_run_id'] = previous['run_id']
@@ -158,6 +156,7 @@ class Investigation:
             self.report['stage'] = stage
         self.report['request_units'] = self.used
         self.report['budget']['used'] = self.used
+        self.report['quality_count'] = self.page_count()
         if persist:
             save_report(self.engine, self.report)
         if self.progress:
@@ -209,6 +208,7 @@ class Investigation:
         return any(' ' + ' '.join(words(name)) + ' ' in ' ' + text + ' ' for name in [self.case['name'], *self.case['aliases']] if words(name))
 
     def model_query(self, query):
+        from .ai import private_output
         query = field(query, 'Web search query', 200)
         allowed = set(words(self.case['name'] + ' ' + ' '.join(self.case['aliases']) + ' ' + self.options['query'] + ' ' + self.options['context']))
         allowed.update('profile linkedin github company news interview about contact research portfolio official website biography'.split())
@@ -216,8 +216,18 @@ class Investigation:
             allowed.update(words(domain))
         for url in self.allowed_urls:
             allowed.update(words(urlsplit(url).hostname or ''))
+        # Follow public employer/location/topic words already visible in search
+        # results. Saved private context never supplies this vocabulary.
+        for lead in self.report['web_results']:
+            allowed.update(token for token in words(lead['title'] + ' ' + lead.get('snippet', ''))
+                           if len(token) >= 2 and not any(c.isdigit() for c in token))
         allowed.add('site')
-        if not self.relevant(query) or set(words(query)) - allowed or any(c in query for c in '@\\\n\r'):
+        explicitly_public = ' '.join([self.case['name'], *self.case['aliases'], self.options['query'], self.options['context']]).casefold()
+        private_clues = [clue for clue in self.case['identifiers'] if clue.casefold() not in explicitly_public]
+        normalized_query = ' ' + ' '.join(words(query)) + ' '
+        private_phrase = any(' ' + ' '.join(words(clue)) + ' ' in normalized_query
+                             for clue in private_clues if words(clue) and not clue.startswith('https://'))
+        if private_phrase or private_output(query, private_clues) != query or not self.relevant(query) or set(words(query)) - allowed or any(c in query for c in '@\\\n\r'):
             raise InvalidInput('AI searches must use the subject name and approved public context or source domains.')
         return query
 
@@ -231,19 +241,42 @@ class Investigation:
             for item in result['results']:
                 match = self.relevant(item['title'], item['snippet'])
                 entry = {**item, 'source_id': result['id'], 'relevant': match,
+                         'local_match': local_match(self.case, item['title'] + ' ' + item['snippet'], item['url']),
                          'reason': 'Name or alias appears in title/snippet; identity unconfirmed.' if match else 'No complete name/alias match; not followed automatically.'}
                 current_results.append(entry)
                 existing = next((x for x in self.report['web_results'] if x['url'] == item['url']), None)
                 if existing:
+                    hint = existing.get('local_match', {}).get('model_assessment')
+                    if hint:
+                        entry['local_match']['model_assessment'] = hint
                     existing.update(entry)
                 else:
                     self.report['web_results'].append(entry)
                 if match:
                     self.allowed_urls.add(item['url'])
             self.report['web_results'] = self.report['web_results'][:40]
+            self.report['web_results'].sort(key=rank_key, reverse=True)
             self.publish()
             return {**result, 'results': current_results}
         return {'error': 'Web search unavailable. See its tool activity and retry.', 'results': []}
+
+    def compare_locally(self):
+        if not self.ai or not self.report['web_results']:
+            return
+        candidates = self.report['web_results'][:10]
+        def compare():
+            from .ai import compare_candidates
+            hints = compare_candidates(self.ai, self.case, candidates)
+            for index, lead in enumerate(candidates):
+                lead['local_match']['model_assessment'] = hints.get(index, 'uncertain')
+            self.report['web_results'].sort(key=rank_key, reverse=True)
+            self.report['local_comparison'] = {'status': 'complete', 'compared': len(candidates),
+                'consistent': sum(v == 'context_consistent' for v in hints.values()),
+                'unlikely': sum(v == 'context_unlikely' for v in hints.values())}
+            return {'summary': 'Saved case details compared locally. Context hints are unverified; private values stay local.'}
+        result = self.step('Local AI: compare saved case details with public leads', compare, 0, 'analyze', {})
+        if result is None:
+            self.report['local_comparison'] = {'status': 'failed', 'compared': 0}
 
     def fetch(self, url, title, allow_query=False):
         raw, format, canonical = collector.fetch_public(url, allow_query=allow_query)
@@ -264,10 +297,20 @@ class Investigation:
             saved = collector.collect(self.engine, self.case_id, url, True, allow_query=True)
             self.remember(saved)
             evidence = self.engine.evidence(self.case_id, saved['id'])
+            with self.engine.connection() as db:
+                raw = db.execute('SELECT raw FROM evidence WHERE id=? AND case_id=?', (saved['id'], self.case_id)).fetchone()['raw']
+            quality = assess_page(raw, evidence['format'])
+            match = local_match(self.case, quality['text'], evidence['source'])
+            lead = next((x for x in self.report['web_results'] if x['url'] == url), None)
+            hint = (lead or {}).get('local_match', {}).get('model_assessment')
+            if hint:
+                match['model_assessment'] = hint
+            useful = quality['useful'] and (self.relevant(quality['text']) or match['level'] in {'identifier_match', 'context_match'})
+            if hint == 'context_unlikely' and match['level'] != 'identifier_match':
+                useful = False
+            reason = quality['reason'] if not quality['useful'] else 'Substantive public content, but this is an unverified likely namesake.' if hint == 'context_unlikely' and not useful else 'Substantive content lacks subject or saved-clue corroboration.' if not useful else quality['reason']
             links = []
-            if evidence['format'] == 'html':
-                with self.engine.connection() as db:
-                    raw = db.execute('SELECT raw FROM evidence WHERE id=? AND case_id=?', (saved['id'], self.case_id)).fetchone()['raw']
+            if evidence['format'] == 'html' and quality['useful']:
                 parser = PageLinks(evidence['source'])
                 parser.feed(raw.decode('utf-8-sig'))
                 for link in parser.links:
@@ -283,12 +326,14 @@ class Investigation:
             self.allowed_urls.update(x['url'] for x in links)
             self.allowed_urls.add(evidence['source'])
             page = {'url': url, 'final_url': evidence['source'], 'source_id': saved['id'], 'run_id': self.report['run_id'],
-                    'excerpt': evidence['text'][:1800], 'links': links}
+                    'excerpt': quality['text'][:1800], 'links': links, 'useful': useful,
+                    'quality_reason': reason, 'local_match': match}
             self.report['pages'] = [p for p in self.report['pages'] if p['url'] != url] + [page]
             for lead in self.report['web_results']:
                 if lead['url'] == url:
                     lead['page_source_id'] = saved['id']
-            return {**saved, 'url': evidence['source'], 'links': links, 'summary': 'Public page saved; ' + str(len(links)) + ' follow-up links found.'}
+            return {**saved, 'url': evidence['source'], 'links': links, 'useful': useful,
+                    'summary': ('Useful candidate page saved. ' if useful else 'Original saved; does not fill useful-page goal. ') + reason}
         result = self.step('Collect page: ' + url, collect_page, tool='collect_page', arguments={'url': url})
         self.pages[url] = result or {'error': self.report['steps'][-1].get('error', 'Page collection failed.')}
         return self.pages[url]
@@ -301,7 +346,7 @@ class Investigation:
         return self.step(label, reuse, 0, tool, arguments) or result
 
     def page_count(self):
-        return sum(bool(result.get('id')) for result in self.pages.values())
+        return sum(p.get('useful') is True and p.get('run_id') == self.report['run_id'] for p in self.report['pages'])
 
     def domain(self, domain, signals=None):
         if not self.enabled:
@@ -353,7 +398,8 @@ class Investigation:
             if name in fields and set(arguments) == fields[name] and all(isinstance(v, str) and len(v) <= 2000 for v in arguments.values()):
                 def blocked():
                     raise exc
-                self.step('Blocked AI tool: ' + name, blocked, 0, name, arguments)
+                from .ai import private_output
+                self.step('Blocked AI tool: ' + name, blocked, 0, name, private_output(arguments, self.case['identifiers']))
             raise
         finally:
             self.origin = old_origin
@@ -400,17 +446,20 @@ class Investigation:
             raise InvalidInput('Start local AI and wait for Ready, then retry AI analysis.')
         from .ai import run_assistant
         def analyze():
+            if not self.report.get('local_comparison'):
+                self.compare_locally()
             result = run_assistant(self.ai, self.report, self.dispatch, lambda: self.check(),
-                                   activity=lambda message: self.publish(message))
+                                   activity=lambda message: self.publish(message), private_context=self.case['identifiers'])
             self.report['ai'] = result
             return {'summary': 'Local AI ' + result['status'] + '.', **result}
         result = self.step('Local AI: planning searches and following public sources', analyze, 0, 'analyze', {})
         if result is None:
+            from .ai import private_output
             entry = next(s for s in reversed(self.report['steps']) if s.get('tool') == 'analyze')
             trace = [{'tool': s['tool'], 'arguments': s['arguments'], 'ok': s['ok'],
                       'result': s.get('error') or s.get('result_summary', '')}
                      for s in self.report['steps'][self.start_step:] if s.get('origin') == 'ai']
-            self.report['ai'] = {'status': 'failed', 'error': entry.get('error', 'Local AI unavailable. Retry AI analysis.'), 'source_ids': [], 'tool_calls': trace}
+            self.report['ai'] = private_output({'status': 'failed', 'error': entry.get('error', 'Local AI unavailable. Retry AI analysis.'), 'source_ids': [], 'tool_calls': trace}, self.case['identifiers'])
         return result
 
     def profile(self, candidate):
@@ -472,12 +521,18 @@ class Investigation:
             if not matching and self.case['aliases']:
                 self.web_search('"' + self.case['aliases'][0] + '"')
                 matching = [x for x in self.report['web_results'] if x['relevant']]
-            automatic_pages = max(1, self.options['page_limit'] - (1 if self.ai else 0))
-            for lead in matching:
+            self.compare_locally()
+            automatic_pages = self.options['page_limit']
+            self.follow_candidates(automatic_pages)
+            # Public-only refinements never include private clues or model prose.
+            for suffix in ['profile contact', 'biography website']:
                 if self.page_count() >= automatic_pages:
                     break
-                self.page(lead['url'])
-            if not matching:
+                refined = query + ' ' + suffix
+                if len(refined) <= 200:
+                    self.web_search(refined)
+                    self.follow_candidates(automatic_pages)
+            if not any(x['relevant'] for x in self.report['web_results']):
                 self.skip('Follow web results', 'No complete name/alias match. Add public context or edit the search query.', 'collect_page')
         for provider in ['wikipedia', 'wikidata']:
             if provider in selected:
@@ -541,6 +596,19 @@ class Investigation:
         if self.ai:
             self.analyze()
 
+    def follow_candidates(self, goal):
+        for lead in sorted(self.report['web_results'], key=rank_key, reverse=True):
+            if self.page_count() >= goal:
+                return
+            match = lead.get('local_match', {})
+            if lead.get('relevant') and lead['url'] not in self.pages and (match.get('level') == 'identifier_match' or match.get('model_assessment') != 'context_unlikely'):
+                self.page(lead['url'])
+                for link in next((p['links'] for p in self.report['pages'] if p['url'] == lead['url'] and p.get('useful')), [])[:2]:
+                    if self.page_count() >= goal:
+                        return
+                    if link['url'] not in self.pages:
+                        self.page(link['url'])
+
     def user_tool(self, name, args):
         if not isinstance(args, dict):
             raise InvalidInput('Tool inputs must be an object.')
@@ -582,8 +650,11 @@ class Investigation:
             current = self.report['steps'][self.start_step:]
             failures = sum(step.get('status') == 'failed' for step in current)
             ai_failed = self.report.get('ai', {}).get('status') in {'failed', 'truncated', 'limited'} if self.ai else False
-            self.report['status'] = ('partial' if failures or ai_failed else 'complete') if self.report['source_ids'] else 'failed'
+            shortfall = 'web_search' in self.options['tools'] and not action and self.page_count() < self.options['page_limit']
+            self.report['status'] = ('partial' if failures or ai_failed or shortfall else 'complete') if self.report['source_ids'] else 'failed'
             self.report['stop_reason'] = ('Selected tool finished; prior evidence retained.' if action else 'Selected sources and relevant follow-ups finished.') + (' Some tools were unavailable; edit or retry them below.' if failures or ai_failed else '') + ' Request ceiling is a limit, not a target.'
+            if shortfall:
+                self.report['stop_reason'] += f' Useful-page goal not reached: {self.page_count()} of {self.options["page_limit"]}. Bounded public searches and eligible leads exhausted; refine public context or retry a source.'
         except Halt:
             pass
         except InvalidInput as exc:

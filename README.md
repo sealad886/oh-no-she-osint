@@ -48,15 +48,20 @@ To disable external collection, including DNS:
 3. For a common name, edit **Web search query** and add **Public context**, such as
    a public location, employer or topic. The default query quotes the subject's
    full name. Existing contact details are not appended to searches automatically.
+   They still help: the engine compares known identifiers with collected public
+   material locally, and optional local AI receives private case context for comparison.
    Select the tools you want, set limits, then click **Run investigation**.
 4. Follow **Tool activity** while the run works. Each call shows its inputs, status,
    result or error, timing, source evidence and whether the engine, AI or you
    requested it. **Edit & retry** changes and reruns one tool without rerunning the
    whole investigation. **Run a tool** starts a separate search, page collection,
    domain signal or evidence read. Earlier activity and sources stay saved.
-5. Read the dossier and its source references. Automatic follow-up requires a
-   complete subject-name or alias match in the result title/snippet; partial name
-   fragments do not qualify. This is a relevance filter, not proof of identity.
+5. Read the dossier and its source references. Leads distinguish local identifier
+   corroboration, public-context matches, name-only matches and unrelated material.
+   Local matching compares known clues with returned public material without sending
+   those clues to search providers. Optional AI context assessment is an unverified
+   local hint. A name match alone does not establish identity, and partial name
+   fragments do not qualify for automatic follow-up.
    Candidates and AI drafts remain unconfirmed. **Stop** retains sources already
    saved and stops before the next request.
    Wikidata claims preserve statement rank, qualifiers, date precision and calendar;
@@ -77,9 +82,12 @@ you stopped it, or tools were unavailable. Units count collection operations;
 registration reserves two, and a permitted redirect can add HTTP requests within
 one operation. Reading saved evidence and local model requests use no outbound units.
 
-The page goal defaults to **4 successful page collections**, configurable from 1
-to 8. Failed pages still consume request units but do not fill the page goal; the
-engine tries later relevant results. With AI enabled, automatic collection reserves
+The page goal defaults to **4 useful relevant pages**, configurable from 1 to 8.
+A successful HTTP response can still be a login screen, empty JavaScript shell or
+unrelated page. Those originals are saved and labelled, but do not fill the goal.
+Failed or non-useful pages still consume request units; the engine tries later
+relevant results. Useful counts refer to the current run; earlier pages stay visible.
+With AI enabled, automatic collection reserves
 a page slot for model follow-up. There is a 300-second soft run deadline and one run
 at a time. Requests in flight finish before cancellation;
 OS DNS follows the OS timeout policy. Restart marks unfinished runs **interrupted**
@@ -123,14 +131,17 @@ The app provides these tools; you do not need to install an extra tool server:
 
 `search_subject` and `news_search` reuse collected results; `web_search` performs
 real searches. Model queries must include the subject's name or alias and use only
-approved public context, source domains and bounded profile/news keywords. The model
+approved public context, source domains, words observed in returned public titles/snippets,
+and bounded profile/news keywords. Saved private clues remain blocked even when a
+clue's words also appear in a public result. The model
 cannot send unrelated queries, fetch invented URLs, access other cases or execute
-commands. Tool activity exposes its actual calls and failures. Up to four
-model turns and six tool calls; 512 generated tokens per turn. AI drafts can be
+commands. Tool activity exposes its actual calls and failures. The assistant loop
+allows up to four model turns and six tool calls; local relevance comparisons are
+separate model requests. Generation is bounded to 512 tokens per request. AI drafts can be
 wrong and remain labelled unverified. The model is directed to search and follow a
 relevant page; successful evidence reading is required before a draft is accepted
 when sources exist. A required search/tool failure leaves the draft incomplete.
-The first AI search uses your configured public query, adding the quoted subject
+The first AI search is offered your configured public query, adding the quoted subject
 only if no complete subject or alias is present. Required page/evidence calls choose
 from available leads and saved source IDs. Model search queries cap at 200 characters;
 shorten the query if adding the subject would exceed this limit.
@@ -139,6 +150,18 @@ marked incomplete and retained for inspection. Later timeouts preserve completed
 tool calls, so you can inspect them and retry analysis.
 Cached tool reuse is also visible and uses no collection unit. AI follow-up prefers
 untried leads; use an individual retry to attempt a previously failed page again.
+
+Private contact identifiers and case context are supplied only to the owned local
+model and the deterministic local comparator for judging public leads. This private
+prompt context is not copied into investigation reports or prompt logs, is not
+appended to web queries, and does not expand the model's allowed public vocabulary.
+The model is asked to avoid repeating raw private identifiers. An output guard also
+redacts literal clue echoes and formatted phone echoes from drafts and rejected tool
+activity, including timeout traces. This is not a general anonymizer: inspect drafts
+before sharing them. Its context assessment remains an unverified hint.
+An unlikely namesake does not fill the useful-page goal unless a direct identifier
+match corroborates it. Explicit public URL/domain leads retain their separate
+collection behavior; private contact hints are not treated as outbound leads.
 **Stop local AI** or stopping the app shuts down only its owned model process.
 Initial loading can take a minute and requires enough free memory. External model
 servers and unrelated llama.cpp sessions are left alone.
@@ -150,7 +173,7 @@ servers and unrelated llama.cpp sessions are left alone.
 | DuckDuckGo Lite | Up to 10 public web results per search | Full query, including chosen public context; AI's approved query refinements |
 | Wikipedia / Wikidata | Candidates, profiles, relationship labels and a page | Subject name or first alias; selected public IDs and page requests |
 | GDELT / linked news sites | Up to 8 recent mentions; up to 2 article pages | Quoted subject name; selected article requests |
-| Local llama.cpp (optional) | Tool calls and draft summary | Nothing: authenticated loopback; cached model only |
+| Local comparator and llama.cpp (optional) | Compare private known clues with public results; draft summary | Nothing: local comparison and authenticated loopback; cached model only |
 | OS DNS resolver | A/AAAA address results | Requested domain |
 | IANA + domain registry | RDAP registration response | Registry sees requested domain; IANA sees bootstrap request |
 | Domain TLS endpoint | Verified certificate and DER bytes | Requested hostname and connection |

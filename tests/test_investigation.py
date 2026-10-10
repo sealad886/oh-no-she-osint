@@ -105,7 +105,7 @@ class InvestigationTests(unittest.TestCase):
         elif 'gdeltproject' in url:
             payload = {'articles': [{'title': 'Ada Lovelace history article', 'url': 'https://news.example.org/article', 'seendate': '20261009'}]}
         else:
-            return b'<p>Ada Lovelace example.org</p>', 'html', url
+            return b'<p>Ada Lovelace wrote detailed notes about the analytical engine and its potential mathematical applications.</p>', 'html', url
         return json.dumps(payload).encode(), 'json', url
 
     def signals(self, engine, case_id, domain, signals, enabled):
@@ -114,7 +114,7 @@ class InvestigationTests(unittest.TestCase):
 
     def test_subject_alone_collects_dossier_and_cited_claims(self):
         with patch('local_osint.collector.fetch_public', side_effect=self.provider) as fetch, patch('local_osint.collector.research', side_effect=self.signals):
-            report = Investigation(self.engine, self.case['id'], True).run()
+            report = Investigation(self.engine, self.case['id'], True, options={'page_limit': 3}).run()
         self.assertEqual(report['status'], 'complete')
         occupation = next(c for c in report['profiles'][0]['claims'] if c['property'] == 'P106')
         self.assertEqual(occupation['value'], 'Mathematician')
@@ -288,9 +288,9 @@ class InvestigationTests(unittest.TestCase):
                 return b'{"query":{"search":[{"pageid":1,"title":"Unrelated disease","snippet":"Mulhall references"}]}}', 'json', url
             if 'wikidata' in url:
                 return b'{"search":[]}', 'json', url
-            return b'<p>Eric Mulhall public profile</p><a href="/people/eric/about">About Eric Mulhall</a>', 'html', url
+            return b'<p>Eric Mulhall works in a public laboratory researching molecular biology and publishing detailed scientific articles.</p><a href="/people/eric/about">About Eric Mulhall</a>', 'html', url
         with patch('local_osint.collector.fetch_public', side_effect=provider) as fetch, patch('local_osint.collector.research') as domains:
-            report = Investigation(self.engine, case['id'], True, options={'tools': ['web_search', 'wikipedia', 'wikidata', 'domain']}).run()
+            report = Investigation(self.engine, case['id'], True, options={'tools': ['web_search', 'wikipedia', 'wikidata', 'domain'], 'page_limit': 1}).run()
         urls = [c.args[0] for c in fetch.call_args_list]
         self.assertIn('https://example.org/people?id=7', urls)
         self.assertFalse(any('Unrelated_disease' in url or '/unrelated' in url for url in urls))

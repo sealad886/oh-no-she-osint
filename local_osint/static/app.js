@@ -276,6 +276,22 @@ function publicLink(area, url, text) {
     const link = node('a', text || url, 'public-link'); link.href = parsed.href; link.target = '_blank'; link.rel = 'noopener noreferrer'; area.append(link);
   } catch (_) { /* Invalid public URLs remain visible as plain source text. */ }
 }
+function matchLabel(match, relevant) {
+  return ({identifier_match: 'LOCALLY CORROBORATED LEAD / IDENTITY UNCONFIRMED', context_match: 'CONTEXT MATCH / IDENTITY UNCONFIRMED', name_only: 'NAME MATCH ONLY / IDENTITY UNCONFIRMED', unrelated: 'UNRELATED OR UNCORROBORATED LEAD'})[match?.level] || (relevant === true ? 'NAME MATCH / IDENTITY UNCONFIRMED' : relevant === false ? 'NOT SELECTED FOR FOLLOW-UP' : 'UNCONFIRMED PUBLIC LEAD');
+}
+function localMatchNote(area, match) {
+  if (!match) return;
+  if (match.summary) area.append(node('p', match.summary, 'small'));
+  const labels = {email: 'Known email', phone: 'Known phone', known_url: 'Known public URL', domain: 'Known domain', context: 'Known context', name: 'Subject name', alias: 'Known alias'};
+  const signals = (match.signals || []).map(signal => {
+    const kind = labels[signal.kind] || 'Local comparison';
+    const identifier = Number.isInteger(signal.identifier_index) ? ' #' + (signal.identifier_index + 1) : '';
+    return kind + identifier + (signal.strength ? ' · ' + signal.strength : '');
+  });
+  if (signals.length) area.append(node('p', 'Local comparison: ' + signals.join('; '), 'small muted'));
+  const assessment = {context_consistent: 'Public material appears consistent with known private context.', context_unlikely: 'Public material appears unlikely to fit known private context.', uncertain: 'Known private context does not resolve this lead.'}[match.model_assessment];
+  if (assessment) area.append(node('p', 'Local AI hint — unverified: ' + assessment, 'small muted'));
+}
 function renderRun(report, caseId) {
   if (currentCase !== caseId) return;
   if (displayedRun?.case_id === caseId) {
@@ -288,7 +304,9 @@ function renderRun(report, caseId) {
   const running = report?.status === 'running';
   const steps = report?.steps || [], budget = report?.budget || {used: report?.request_units || 0, limit: report?.options?.max_requests || 24};
   const currentSteps = steps.some(step => step.run_id) ? steps.filter(step => step.run_id === report.run_id) : steps;
-  $('run-progress').textContent = report ? `${report.stage || report.status} · ${currentSteps.filter(s => s.ok || s.status === 'success').length} successful tool calls · ${budget.used} collection units used (ceiling ${budget.limit})` : 'Enter a subject and run an investigation. No manual evidence required.';
+  const usefulPages = Number.isFinite(report?.quality_count) ? report.quality_count : (report?.pages || []).filter(page => page.useful === true && (!page.run_id || page.run_id === report.run_id)).length;
+  const qualityProgress = report && (Number.isFinite(report.quality_count) || report.pages?.some(page => typeof page.useful === 'boolean')) ? ` · ${usefulPages} useful pages (goal ${report.options?.page_limit || 4})` : '';
+  $('run-progress').textContent = report ? `${report.stage || report.status} · ${currentSteps.filter(s => s.ok || s.status === 'success').length} successful tool calls${qualityProgress} · ${budget.used} collection units used (ceiling ${budget.limit})` : 'Enter a subject and run an investigation. No manual evidence required.';
   $('run-stop-reason').textContent = report?.stop_reason || (report && !running ? 'The selected work finished. The request ceiling is a safety limit, not a completion target. See individual tool outcomes below.' : '');
   renderActivity(report, caseId);
   const area = $('dossier'); area.replaceChildren();
@@ -296,10 +314,11 @@ function renderRun(report, caseId) {
     area.append(node('p', report.interpretation, 'small'));
     if (report.error) area.append(node('p', report.error));
     if (report.web_results?.length) {
-      area.append(node('h3', 'Public web leads'), node('p', 'Matching names are leads. Check the page and its context before identifying a person.', 'small muted'));
+      area.append(node('h3', 'Public web leads'), node('p', 'Known identifiers are compared with collected material locally. Private contact details can guide the local model and are not added to web searches. Local corroboration helps rank leads; it does not confirm identity.', 'small muted'));
       for (const result of report.web_results) {
         const card = node('article', undefined, 'profile-card web-result');
-        card.append(node('p', result.relevant === true ? 'RELEVANT LEAD / IDENTITY UNCONFIRMED' : result.relevant === false ? 'NOT SELECTED FOR FOLLOW-UP' : 'UNCONFIRMED PUBLIC LEAD', 'eyebrow'), node('h4', result.title || result.url), node('p', result.snippet || ''), node('p', result.url, 'detail-meta'));
+        card.append(node('p', matchLabel(result.local_match, result.relevant), 'eyebrow'), node('h4', result.title || result.url), node('p', result.snippet || ''), node('p', result.url, 'detail-meta'));
+        localMatchNote(card, result.local_match);
         if (result.reason) card.append(node('p', result.reason, 'small muted'));
         publicLink(card, result.url, 'Open public source ↗');
         sourceLink(card, caseId, result.source_id, 'Original web search evidence');
@@ -312,8 +331,14 @@ function renderRun(report, caseId) {
       area.append(node('h3', 'Collected public pages'));
       for (const page of report.pages) {
         const card = node('article', undefined, 'profile-card');
+        if (typeof page.useful === 'boolean') {
+          card.append(node('p', page.useful ? 'USEFUL PUBLIC SOURCE / IDENTITY UNCONFIRMED' : 'SAVED PAGE / NOT USEFUL FOR THE PAGE GOAL', 'eyebrow'));
+          if (page.quality_reason) card.append(node('p', page.quality_reason, page.useful ? 'small' : 'step-error'));
+        }
+        if (page.local_match) { card.append(node('p', matchLabel(page.local_match), 'small')); localMatchNote(card, page.local_match); }
         card.append(node('h4', page.title || page.final_url || page.url), node('p', page.excerpt || ''), node('p', page.final_url || page.url, 'detail-meta'));
         sourceLink(card, caseId, page.source_id, 'Original collected page');
+        if (page.useful === false) addToolButton(card, 'Inspect & retry page', caseId, 'collect_page', {url: page.url});
         const links = (page.links || []).slice(0, 6);
         if (links.length) {
           const more = node('details'); more.append(node('summary', 'Public links found on this page'));
@@ -425,7 +450,7 @@ function renderToolFields(tool, args = {}) {
     toolField(area, 'Saved evidence ID', 'tool-evidence', args.id || '', {maxLength: 200, required: true});
     area.append(node('p', 'Reads an existing source in this case. It does not send evidence online.', 'small'));
   } else if (tool === 'analyze') {
-    area.append(node('p', 'Ask the local model to review the evidence already collected for this case. Its tool calls and cited draft appear in the activity and dossier.', 'small'));
+    area.append(node('p', 'Ask the local model to compare this case’s known identifiers and private context with collected public evidence. Private clues stay local; searches use the approved public query. Its tool calls and cited draft appear in the activity and dossier.', 'small'));
   }
   $('tool-privacy-note').textContent = ['analyze', 'read_evidence'].includes(tool) ? 'Evidence stays on this machine. Start local AI first for analysis.' : 'This sends your chosen query, URL or domain to public sources. Evidence and processing stay local.';
   updateToolSubmit();

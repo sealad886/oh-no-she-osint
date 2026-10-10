@@ -47,9 +47,12 @@ assess evidence before attributing it to a person or organization.
 ## Automatic collection and model boundary
 
 Runs reserve one worker, a default 24-request-unit ceiling (configurable 1–64),
-a default four-successful-page goal (configurable 1–8), and a 300-second soft
+a default four-useful-page goal (configurable 1–8), and a 300-second soft
 deadline. A ceiling bounds work; it is not a completion target. Failed collection
-attempts consume units but do not fill the successful-page goal. Registration
+attempts consume units but do not fill the useful-page goal. A saved login screen,
+empty JavaScript shell or unrelated page also does not fill the goal. Raw originals
+remain evidence even when they fail the usefulness heuristic. Useful counts refer
+to the current run; retained prior pages remain separately inspectable. Registration
 reserves two units for directory and registry; redirect contacts occur within an
 operation rather than consuming separate units. Returned URLs use the same
 public-address pinning and redirect revalidation as manual collection.
@@ -66,7 +69,11 @@ bypass is attempted. Automatic follow-up requires a full subject-name or alias m
 in a title/snippet. Wikipedia/Wikidata results use the same full-name relevance
 filter, so unrelated name fragments do not drive profile collection. This heuristic
 cannot confirm identity or guarantee relevance. User-entered public context narrows
-queries; stored contact identifiers are not silently appended. Email-provider domains
+queries; stored contact identifiers are not silently appended. A deterministic local
+comparator checks returned public material against known case identifiers and labels
+identifier corroboration, public-context matches, name-only matches and unrelated
+material. These are bounded heuristic signals, not identity confirmation.
+Email-provider domains
 are not researched automatically. Namesake profiles remain separate, unconfirmed
 candidates. Candidate-domain research uses only the first collected profile's
 website claims, with its candidate and evidence IDs attached.
@@ -79,13 +86,37 @@ Optional llama.cpp runs from a local cached GGUF in an owned subprocess. It bind
 its web UI, downloads, built-in tools and prompt logging, and clears ambient llama
 options, proxy settings and TLS key logging. Browser requests cannot choose a model
 path or endpoint. A trusted startup `--model` flag can choose a different local GGUF.
-The app stops only its owned process. Model responses cap at 1 MiB, prompts at 128 KiB,
-four turns and six tool calls. GPU memory is model-dependent, not resource-isolated.
+The app stops only its owned process. Model responses cap at 1 MiB and prompts at
+128 KiB. The assistant loop caps at four turns and six tool calls; optional local
+relevance comparisons make separate bounded model requests. GPU memory is
+model-dependent, not resource-isolated.
+
+Private case identifiers and context are passed only to the owned local model and
+deterministic local comparator. The ephemeral model prompt context is excluded from
+persisted investigation reports and prompt logs. It is not appended to outbound web
+queries and does not enlarge the model's permitted public-query vocabulary. Explicit
+public URL/domain leads remain independently eligible for collection; private
+contact details are not converted into outbound leads. The local model is instructed
+not to repeat raw private identifiers in a draft. A deterministic output guard
+also removes literal clue/contact echoes and formatted phone echoes from model
+drafts, rejected tool activity and timeout traces. This does not detect every
+paraphrase or inferred personal detail; users must inspect drafts before exporting
+or sharing them. The original case
+identifiers remain stored in the private case database and its case exports.
+
+Optional local model comparison adds an unverified context-consistent, unlikely or
+uncertain hint to public leads without including private values in that assessment.
+An unlikely namesake does not count toward the useful-page goal unless a direct
+identifier match corroborates it; collected raw evidence is retained. Model hints
+can be wrong and never establish identity.
 
 A central dispatcher permits only case-run evidence IDs and approved URL/domain
 leads. The model's real `web_search` queries must contain the full subject name or
-alias and use only approved public context, approved source domains and a bounded
-keyword vocabulary. The model cannot add unrelated tokens, new private contact
+alias and use only approved public context, approved source domains, nonnumeric
+words observed in returned public titles/snippets, and a bounded keyword vocabulary.
+Private clue echoes and normalized private-clue phrases remain blocked before
+dispatch, even when those words appear publicly, unless the user explicitly placed
+the clue in their public query/context. The model cannot add unrelated tokens, new private contact
 identifiers or arbitrary query text. The query is still observable by the provider.
 `search_subject` and `news_search` return already-collected responses; `collect_page`
 can follow relevant search results or approved links discovered on collected pages.

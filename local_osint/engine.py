@@ -379,6 +379,8 @@ class Engine:
             if report.get('budget'):
                 budget = report['budget']
                 lines.extend(['Request usage: ' + str(budget['used']) + ' of ' + str(budget['limit']) + ' request units. The ceiling is a limit, not a completion target.', ''])
+            if 'quality_count' in report:
+                lines.extend(['Useful candidate pages: ' + str(report['quality_count']) + ' of goal ' + str(report['options']['page_limit']) + '. Login walls, empty shells and unlikely namesakes do not fill this goal.', ''])
             if report.get('web_results'):
                 lines.extend(['### Public web search leads - identity unconfirmed', ''])
                 for result in report['web_results']:
@@ -387,6 +389,11 @@ class Engine:
                         lines.append('  Search snippet: ' + escape(result['snippet']))
                     if result.get('reason'):
                         lines.append('  Follow-up decision: ' + escape(result['reason']))
+                    if result.get('local_match'):
+                        match = result['local_match']
+                        lines.append('  Local case comparison: ' + escape(match['summary']))
+                        if match.get('model_assessment'):
+                            lines.append('  Unverified local AI context hint: ' + escape(match['model_assessment']))
                     if result.get('source_id'):
                         lines.append('  Search evidence ID: ' + escape(result['source_id']))
                     if result.get('page_source_id'):
@@ -400,6 +407,9 @@ class Engine:
                                   '  Evidence ID: ' + escape(page['source_id'])])
                     if page.get('excerpt'):
                         lines.append('  Source excerpt: ' + escape(page['excerpt']))
+                    if 'useful' in page:
+                        lines.append('  Useful candidate content: ' + ('yes' if page['useful'] else 'no'))
+                        lines.append('  Quality decision: ' + escape(page.get('quality_reason', '')))
                     for link in page.get('links', []):
                         lines.append('  Discovered follow-up: ' + escape(link.get('title', '')) + '; URL: ' + escape(link['url']))
                     lines.append('')

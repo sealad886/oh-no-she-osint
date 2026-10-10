@@ -62,7 +62,10 @@ class LauncherTests(unittest.TestCase):
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             if opened.exists():
-                return opened.read_text()
+                # The browser helper creates its file before writing the URL.
+                link = opened.read_text()
+                if link:
+                    return link
             if process.poll() is not None:
                 self.fail('Launcher exited before browser handoff: ' + re.sub(r'http://\S+', '[private link]', log_path.read_text()))
             time.sleep(0.02)
