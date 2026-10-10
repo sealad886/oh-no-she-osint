@@ -94,6 +94,25 @@ The app stops only its owned process. Model responses cap at 1 MiB and prompts a
 relevance comparisons make separate bounded model requests. GPU memory is
 model-dependent, not resource-isolated.
 
+Continue investigation owns the same single worker and starts only this installed,
+cached local model. Planning responses are strict bounded JSON selecting a public
+search, an eligible untried page, or exhaustion. Saved source IDs, raw bytes and prior
+tool history carry forward; useful pages count cumulatively and collection uses a
+fresh user-selected request ceiling and 300-second soft deadline. Each executed
+collection action consumes that ceiling. Cancellation, model errors, repeated invalid
+choices and repeated unavailable searches stop further planning while retaining
+evidence. An in-flight model or provider request may finish before a stop takes effect.
+
+Continuation restores only case-approved source URLs, respects selected source
+categories, skips attempted URLs/queries and excludes access/login-barrier hosts.
+Visible public `-site:` terms ask the search provider for alternatives; these terms
+are bounded and revalidated against the same public vocabulary and private-clue
+guard. Planner reasons and rejected arguments use the private-output guard.
+Continuation's final draft disables outbound tools in the dispatcher itself, even
+when a model requests a tool that was absent from its offered schemas. Source reading
+remains case-scoped and local. Restart records an interrupted job; collection resumes
+only when the user clicks Continue, never as unsolicited background traffic.
+
 Private case identifiers and context are passed only to the owned local model and
 deterministic local comparator. The ephemeral model prompt context is excluded from
 persisted investigation reports and prompt logs. It is not appended to outbound web

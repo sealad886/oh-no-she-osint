@@ -7,6 +7,12 @@ def words(text):
     return re.findall(r'[^\W_]+', text.casefold(), re.UNICODE)
 
 
+def outbound_private_clues(case, options):
+    """Clues deliberately entered in public settings are already authorized."""
+    public = ' '.join([case['name'], *case.get('aliases', []), options.get('query', ''), options.get('context', '')]).casefold()
+    return [clue for clue in case.get('identifiers', []) if clue.casefold() not in public]
+
+
 def local_match(case, text, url=''):
     normalized = ' ' + ' '.join(words(text)) + ' '
     name_match = any(' ' + ' '.join(words(name)) + ' ' in normalized

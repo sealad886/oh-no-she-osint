@@ -300,3 +300,48 @@ from the invoked commit skill. Implementation, behavioral/browser verification,
 independent review and documentation receipt are complete. Local commit is the
 remaining handoff action.
 External publication unauthorized.
+
+## Continue investigation planner — 2026-10-10
+
+Accepted feature: one click resumes the latest saved investigation, including
+partial, limited, cancelled and restart-interrupted reports. Preserve immutable
+originals, source references and tool history; count useful pages cumulatively
+and give the continuation a fresh user-selected request budget. Automatically
+start the owned, installed local model from its cached file without downloads.
+The model selects one validated public search or untried page at a time using
+private case details only locally. Previously attempted URLs and queries are
+not automatically repeated. Access/login barriers exclude that host; alternative
+public sources remain eligible. Individual user retries remain available.
+
+The existing 300-second soft deadline/cancellation and network guards remain.
+Each executed collection action consumes the selected request budget; model errors,
+two repeated invalid decisions, two consecutive unavailable searches or an
+explicit exhaustion decision stop visibly while retaining progress. Drafting
+reads saved sources locally and cannot reopen network tools. A readable page
+and a model hint never establish identity. No new schema or migration is needed.
+
+Route: medium-feature-change, medium scale, high privacy risk, change authority.
+Existing context, acceptance, solution design, planning, implementation, security,
+quality, documentation and independent-review owners apply. Coordination is not
+applicable; publication/release execution remain unauthorized. Retrospective
+addresses the observed partial-run dead end. Ready/design gates are satisfied by
+the explicit request and inspected canonical Jobs/Investigation/model boundary.
+Checklist complete: design, implementation, behavioral/native verification,
+independent review and documentation. Focused local commit remains the handoff
+action. No publication or worktree creation.
+
+Independent review repaired dispatcher-level draft network authority, selected
+source filtering, explicitly approved public-context preservation, visible blocked
+planner errors and retained news URL authority. The repaired frozen source passed
+153 tests locally and independently. New searches preserve fresh leads even when
+the 40-lead display window is full; all original search evidence remains saved.
+Actual native continuation retained and verified 12 parent originals, dispatched
+two public alternative queries with blocked-host exclusions, made two local reads
+and generated a two-citation draft. It remained partial with zero newly useful
+pages: provider availability and a repeated model proposal prevented progress.
+No private clue echoes were observed in its queries or derived AI output.
+
+Retrospective: continuation recovers a workflow and preserves evidence; it cannot
+manufacture public corroboration or make an unavailable provider work. Visible
+planner errors and precise stop reasons are required recovery outcomes. A partial
+native investigation must remain partial even when the software checks pass.

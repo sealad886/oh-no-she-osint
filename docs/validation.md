@@ -1,5 +1,46 @@
 # Validation evidence
 
+## Continue investigation planner — 2026-10-10
+
+The repaired feature passed **153 tests in 6.763 seconds**, independently repeated
+as **153 tests in 8.509 seconds**. The independent source snapshot was
+`0be2a4edcb1e5dfa08673171c66c14467e1ac054e5ecfc9123480d5189a78c21`;
+subsequent changes only update documentation. Python compilation, JavaScript syntax,
+whitespace checks and the AST-only graph update also passed.
+
+New behavioral checks prove immutable source retention, cumulative useful-page
+progress, fresh budgets, access/login exclusions, replacement leads in a full
+display window, restart-interrupted recovery, cancellation/deadline preservation,
+unavailable model recovery, selected-source enforcement, complete retained-news
+collection, explicitly approved public context, private-query rejection and
+dispatcher refusal of network tools during local-only final drafting. Model tests
+cover strict actions/arguments, fenced JSON, invalid/truncated/tool responses,
+prompt bounds and sanitized reasons. Continue API retains authentication and owned
+model configuration boundaries. Most provider/model behavior in the suite is synthetic.
+
+Separately, the existing Eric case was continued through the actual browser,
+installed llama.cpp and cached REDCELL I-Compact model. Automatic startup visibly
+progressed from Loading to Ready. The final native run used settings of 100 request
+units and a 70-useful-page goal. It retained all **12** parent source references;
+all **12** original byte hashes verified. It made **two** fresh public searches,
+both with `-site:` exclusions for known access barriers, **two** successful local
+evidence reads and a local draft citing **two** case sources. Derived AI output and
+outbound queries had **zero observed private-clue echoes** under the same output
+guard; this is not a general data-loss-prevention guarantee.
+
+The native investigation remained **partial, 0 useful pages, 2 request units**.
+One search was unavailable and the model repeated an already attempted query;
+both were visible with actionable errors. No blocked profile was recollected.
+Earlier native recovery also performed five fresh public searches and produced a
+cited local draft, but found no useful corroborating source. These receipts prove
+execution, retention and transparency; they do not confirm Eric's identity or
+guarantee provider availability, new evidence, Windows behavior or user acceptance.
+
+Source review required two bounded rounds. The final review found no material
+remaining P0/P1/P2 issue. A nonblocking limit remains: search exclusions for hosted
+subdomains under .com/.org/.net may cover a broader parent domain; user-edited tool
+queries remain available. No external publication, release or worktree was created.
+
 Date: 2026-10-09. Environment: macOS, Python 3.14.8. Python 3.11+ is the declared
 runtime floor; other interpreter versions and Windows have not been exercised.
 No user acceptance or exhaustive security certification is claimed.

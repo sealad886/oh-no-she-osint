@@ -71,6 +71,9 @@ To disable external collection, including DNS:
    sources, searches the public web, follows approved leads and drafts locally.
    **Analyze collected evidence** can retry AI independently, including after a
    failed or incomplete draft.
+   **Continue investigation** uses the saved dossier and tool outcomes to plan
+   further collection. It starts the owned local model automatically if needed;
+   the AI checkbox does not need to be enabled.
 7. Inspect indicators and original sources below the dossier, or import your own
    evidence. Export a readable Markdown dossier or complete JSON export with originals,
    fingerprints, timestamps, subject metadata, run history and source references.
@@ -89,7 +92,9 @@ whole-number range, with no fixed product cap of 8.
 A successful HTTP response can still be a login screen, empty JavaScript shell or
 unrelated page. Those originals are saved and labelled, but do not fill the goal.
 Failed or non-useful pages still consume request units; the engine tries later
-relevant results. Useful counts refer to the current run; earlier pages stay visible.
+relevant results. A fresh investigation counts its own useful pages. Continuing
+retains the existing useful-page count and evidence, then works toward your chosen
+goal with a fresh collection ceiling.
 With AI enabled, automatic collection tries to fill the useful goal before drafting.
 Larger settings permit more work but do not guarantee more available sources;
 eligible public leads and bounded search refinements can still be exhausted.
@@ -109,6 +114,34 @@ enumeration, login-required scraping, people-search brokers, facial recognition,
 identity attribution, vulnerability scanning or unrestricted crawling.
 
 ## Optional local AI
+
+To extend a saved case, click **Continue investigation**. The local planner reviews
+collected evidence, unavailable tools and remaining public leads, then chooses
+search refinements or page follow-ups. Its decisions, inputs, reasons and outcomes
+appear in **Local AI continuation plan** and **Tool activity**. Excluded hosts and
+the final stop reason explain which paths were exhausted or uncertain.
+
+Continuation requires an installed `llama-server` and a cached local model. It can
+start its owned model automatically, but never downloads a model or installs a
+package. If the model is unavailable, the saved case remains intact and the error
+explains what is needed. You can still edit and retry individual tools yourself.
+
+The useful-page count carries forward; collection units start at zero for each
+continuation. Set the useful-page goal higher before continuing a completed case
+to request more evidence. Each continuation respects your selected tools, query,
+public context, collection ceiling and a fresh 300-second soft deadline. It stops
+when the goal is met, eligible leads are exhausted, uncertainty prevents a useful
+next action, a limit is reached, or you press **Stop**. Original sources and prior
+reports remain saved. Continuing does not confirm identity or guarantee new results.
+
+Previously attempted page URLs and public queries are skipped automatically. Login
+and access-barrier hosts are excluded from follow-up, with visible `-site:` search
+exclusions added when they fit the public query limit. The planner can follow saved
+leads from selected web, Wikipedia, Wikidata and news sources; fresh discovery uses
+public web search when selected. Individual provider/domain retries remain available
+in tool activity. A malformed plan, repeated ineligible choice or unavailable search
+can still leave a partial investigation, with its reason shown. Final continuation
+drafting reads saved evidence locally and cannot launch more network tools.
 
 Install [llama.cpp](https://github.com/ggml-org/llama.cpp) and download the model once:
 

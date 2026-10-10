@@ -196,6 +196,8 @@ function getOptions() {
 function updateRunControls() {
   const busy = displayedRun?.status === 'running';
   $('run-investigation').disabled = busy || !status.network || !currentCase;
+  $('continue-investigation').hidden = !displayedRun || busy;
+  $('continue-investigation').disabled = busy || !status.network || !currentCase;
   $('stop-investigation').hidden = !busy;
   $('investigation-options').disabled = busy || !status.network;
   $('new-tool').disabled = busy || !currentCase;
@@ -208,11 +210,25 @@ async function startInvestigation(caseId) {
   const report = await api('/api/investigate', {case: caseId, ai: $('use-ai').checked, options: getOptions()});
   if (currentCase === caseId) renderRun(report, caseId);
 }
+async function continueInvestigation(caseId) {
+  notice('Continuing from saved evidence. Local AI will plan the next useful sources.');
+  const report = await api('/api/continue', {case: caseId, options: getOptions()});
+  if (currentCase === caseId) renderRun(report, caseId);
+  await refreshAI();
+}
 function sourceLink(area, caseId, id, label = 'View source') {
   if (id) area.append(resultButton('source', label, 'Open ↗', () => showEvidence(caseId, id)));
 }
 const toolLabels = {web_search: 'Public web search', search_subject: 'Public profile search', wikipedia: 'Wikipedia candidates', wikidata: 'Wikidata candidates', news_search: 'Recent news search', news: 'Recent news search', collect_page: 'Public page collection', domain_signals: 'Domain signals', dns: 'DNS addresses', registration: 'Domain registration', certificate: 'TLS certificate', website: 'Public website', read_evidence: 'Read saved evidence', analyze: 'Local AI analysis', local_ai: 'Local AI request', ai_request: 'Local AI request'};
 const argumentLabels = {query: 'Query', context: 'Public context', url: 'URL', domain: 'Domain', provider: 'Provider', signals: 'Signals', id: 'Evidence ID'};
+function argumentList(args) {
+  const list = node('dl', undefined, 'tool-arguments');
+  for (const [key, value] of Object.entries(args || {})) {
+    if (value === undefined || value === null || value === '') continue;
+    list.append(node('dt', argumentLabels[key] || key), node('dd', Array.isArray(value) ? value.join(', ') : typeof value === 'object' ? JSON.stringify(value) : String(value)));
+  }
+  return list;
+}
 function editableStep(step, report) {
   let tool = step.tool, args = {...(step.arguments || {})};
   if (!tool) {
@@ -255,18 +271,31 @@ function renderActivity(report, caseId) {
     card.append(node('p', metadata.join(' · '), 'small muted'));
     const editable = editableStep(step, report);
     const args = Object.keys(step.arguments || {}).length ? step.arguments : editable?.args || {};
-    if (Object.keys(args).length) {
-      const argumentsList = node('dl', undefined, 'tool-arguments');
-      for (const [key, value] of Object.entries(args)) {
-        if (value === undefined || value === null || value === '') continue;
-        argumentsList.append(node('dt', argumentLabels[key] || key), node('dd', Array.isArray(value) ? value.join(', ') : typeof value === 'object' ? JSON.stringify(value) : String(value)));
-      }
-      card.append(argumentsList);
-    }
+    if (Object.keys(args).length) card.append(argumentList(args));
     if (step.result_summary) card.append(node('p', step.result_summary, 'step-result'));
     if (step.error) card.append(node('p', step.error, 'step-error'));
     sourceLink(card, caseId, step.source_id, 'Saved tool evidence');
     if (editable && stepStatus !== 'running') addToolButton(card, stepStatus === 'failed' ? 'Edit & retry' : 'Edit & run again', caseId, editable.tool, editable.args);
+    area.append(card);
+  }
+}
+function renderContinuation(report) {
+  const area = $('continuation-plan'), continuation = report?.continuation;
+  area.replaceChildren(); area.hidden = !continuation;
+  if (!continuation) return;
+  area.append(node('h3', 'Local AI continuation plan'), node('p', 'Saved evidence and useful pages carry forward. This continuation has a fresh collection ceiling and time limit. Planner choices are unverified; actual tool outcomes appear in activity below.', 'small muted'));
+  if (continuation.excluded_hosts?.length) area.append(node('p', 'Hosts excluded from follow-up: ' + continuation.excluded_hosts.join(', '), 'small'));
+  if (continuation.stop_reason) area.append(node('p', continuation.stop_reason, 'small'));
+  const decisions = continuation.decisions || [];
+  if (!decisions.length) area.append(node('p', report.status === 'running' ? 'Preparing a plan from saved sources and tool outcomes…' : 'No further planner actions selected.', 'small'));
+  for (const decision of decisions) {
+    const card = node('article', undefined, 'tool-step');
+    const heading = node('div', undefined, 'step-heading');
+    heading.append(node('h4', toolLabels[decision.action] || decision.action || 'Planner decision'), node('span', decision.status || 'Planned', 'step-status'));
+    card.append(heading);
+    if (decision.reason) card.append(node('p', decision.reason, 'small'));
+    if (decision.error) card.append(node('p', decision.error, 'step-error'));
+    if (Object.keys(decision.arguments || {}).length) card.append(argumentList(decision.arguments));
     area.append(card);
   }
 }
@@ -309,6 +338,7 @@ function renderRun(report, caseId) {
   const qualityProgress = report && (Number.isFinite(report.quality_count) || report.pages?.some(page => typeof page.useful === 'boolean')) ? ` · ${usefulPages} useful pages (goal ${report.options?.page_limit || 4})` : '';
   $('run-progress').textContent = report ? `${report.stage || report.status} · ${currentSteps.filter(s => s.ok || s.status === 'success').length} successful tool calls${qualityProgress} · ${budget.used} collection units used (ceiling ${budget.limit})` : 'Enter a subject and run an investigation. No manual evidence required.';
   $('run-stop-reason').textContent = report?.stop_reason || (report && !running ? 'The selected work finished. The request ceiling is a safety limit, not a completion target. See individual tool outcomes below.' : '');
+  renderContinuation(report);
   renderActivity(report, caseId);
   const area = $('dossier'); area.replaceChildren();
   if (report) {
@@ -418,7 +448,7 @@ async function refreshAI() {
   $('start-ai').disabled = ['ready', 'loading'].includes(ai.state);
   $('stop-ai').hidden = !['ready', 'loading'].includes(ai.state);
   updateRunControls();
-  if (ai.state === 'loading') aiTimer = setTimeout(() => refreshAI().catch(error => notice(error.message)), 1500);
+  if (ai.state === 'loading' || displayedRun?.status === 'running' && displayedRun?.continuation) aiTimer = setTimeout(() => refreshAI().catch(error => notice(error.message)), 1500);
 }
 let toolCase = '';
 function toolField(area, label, id, value = '', attributes = {}) {
@@ -492,6 +522,7 @@ action($('tool-form'), async () => {
   if (currentCase === caseId) { renderRun(report, caseId); notice('Tool started. Follow its activity below.'); }
 }, 'submit');
 action($('run-investigation'), () => startInvestigation(currentCase));
+action($('continue-investigation'), () => continueInvestigation(currentCase));
 action($('stop-investigation'), async () => {
   const report = displayedRun;
   if (!report) return;

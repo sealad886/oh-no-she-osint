@@ -142,6 +142,15 @@ class ServerTests(unittest.TestCase):
         case = self.engine.create_case('Sample')
         self.assertEqual(self.request('/api/investigate', {'case': case['id'], 'ai': True})[0], 400)
 
+    def test_continue_is_authenticated_and_uses_only_owned_planner(self):
+        with patch.object(self.server.jobs, 'start', return_value={'status': 'running'}) as start:
+            payload = {'case': 'saved-case', 'options': {'max_requests': 100, 'page_limit': 70},
+                       'model': 'remote-model', 'endpoint': 'https://remote.example'}
+            self.assertEqual(self.request('/api/continue', payload, authenticated=False)[0], 401)
+            start.assert_not_called()
+            self.assertEqual(self.request('/api/continue', payload)[0], 202)
+            start.assert_called_once_with('saved-case', options=payload['options'], continuing=True)
+
     def test_tool_retry_has_authentication_single_job_and_retained_history(self):
         self.server.jobs.enabled = True
         case = self.engine.create_case('Eric Mulhall', 'person')
