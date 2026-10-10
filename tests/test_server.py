@@ -54,11 +54,18 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(status, 401)
 
     def test_authentication_required_for_private_data(self):
-        for path in ['/api/status', '/api/cases', '/api/view?case=x', '/api/evidence?case=x&id=y', '/api/export?case=x', '/api/entity?case=x&id=y', '/api/investigation?case=x', '/api/ai']:
+        for path in ['/api/status', '/api/prompts', '/api/cases', '/api/view?case=x', '/api/evidence?case=x&id=y', '/api/export?case=x', '/api/entity?case=x&id=y', '/api/investigation?case=x', '/api/ai']:
             with self.subTest(path=path):
                 self.assertEqual(self.request(path, authenticated=False)[0], 401)
         self.assertEqual(self.request('/api/cases', headers={'X-OSINT-Local':''})[0], 401)
         self.assertEqual(self.request('/api/cases', headers={'Cookie':'osint_session=wrong'})[0], 401)
+
+    def test_local_prompt_configuration_is_discoverable(self):
+        from local_osint.prompts import DEFAULT_PROMPTS
+        status, _, settings = self.request('/api/prompts')
+        self.assertEqual(status, 200)
+        self.assertEqual(set(settings['defaults']), set(DEFAULT_PROMPTS))
+        self.assertEqual({p['id'] for p in settings['providers']}, {'duckduckgo', 'bing'})
 
     def test_browser_origin_and_dns_rebinding_are_blocked(self):
         for headers in [{'Origin':'https://evil.example'}, {'Host':'evil.example'}, {'Host':'localhost:' + str(self.server.server_port)}, {'Sec-Fetch-Site':'cross-site'}]:

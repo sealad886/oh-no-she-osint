@@ -5,30 +5,42 @@ other subjects**. Collect public signals online; store evidence, extract indicat
 search and write dossiers entirely on your machine. Enter a subject and press **Start investigation**; the app collects evidence for you.
 
 No accounts, API keys, cloud database, analytics, cloud AI service, external fonts or
-runtime dependencies. Open source under the [MIT license](LICENSE).
+third-party Python packages. Open source under the [MIT license](LICENSE).
 
 ## Start
 
-Install Python 3.11 or newer. From this project directory:
+Install Python 3.11 or newer and nginx. On macOS, `brew install nginx` installs
+the binary; do not start a Homebrew nginx service. From this project directory:
 
 ```sh
 ./start.sh
 ```
 
-The launcher creates a project-only virtual environment if needed, starts the app
-on `127.0.0.1` using a free port, and opens a private browser launch link. Nothing
+The launcher creates a project-only virtual environment if needed, starts its own
+foreground nginx on `127.0.0.1` using a free port, and opens a private browser
+launch link. nginx forwards to an ephemeral loopback Python API. Configuration
+and temporary files stay in a private per-launch directory; shared nginx settings,
+services, access logs and caches are not used. Nothing
 goes online until you request a collection. Keep that link private. Stop with **Ctrl+C**;
 your cases remain on disk.
+
+Closing or leaving the last app tab shuts down the app backend, its owned local
+AI and its owned nginx master and worker, after a two-second grace period that
+allows reloads to reconnect. Other open app tabs keep the runtime alive. If a tab
+crashes without sending its close event, its heartbeat expires after 90 seconds.
+Saved cases remain on disk; run `./start.sh` again to reopen.
 
 For Windows, or without the launcher:
 
 ```sh
 python3 -m venv .venv
-.venv/bin/python -m local_osint serve --open --allow-network
+.venv/bin/python -m local_osint serve --nginx --open --allow-network
 ```
 
 On Windows use `.venv\Scripts\python.exe` instead of `.venv/bin/python`.
 Windows support is intended; current validation was performed on macOS.
+`./start.sh --direct` explicitly runs the Python listener without nginx. Both
+modes use the same authenticated API, evidence store and page lifetime cleanup.
 
 To disable external collection, including DNS:
 
@@ -42,7 +54,8 @@ To disable external collection, including DNS:
    organization, domain or topic, and enter its name. Aliases and public identifiers
    are optional; adding a known website can improve relevance.
 2. Press **Start investigation**. The app searches the real public web through
-   DuckDuckGo Lite, saves the original search response, and follows relevant public
+   the configured public search providers (DuckDuckGo Lite and Bing by default),
+   saves original search responses, and follows relevant public
    pages. A Wikipedia entry is not required. Selected Wikipedia/Wikidata, recent
    GDELT news and domain tools add further evidence when available.
 3. For a common name, edit **Web search query** and add **Public context**, such as
@@ -130,18 +143,52 @@ The useful-page count carries forward; collection units start at zero for each
 continuation. Set the useful-page goal higher before continuing a completed case
 to request more evidence. Each continuation respects your selected tools, query,
 public context, collection ceiling and a fresh 300-second soft deadline. It stops
-when the goal is met, eligible leads are exhausted, uncertainty prevents a useful
-next action, a limit is reached, or you press **Stop**. Original sources and prior
+when the goal is met, fresh strategies and eligible sources are exhausted, a limit
+is reached, or you press **Stop**. Uncertainty changes strategy; it never confirms
+identity or alone declares success. Original sources and prior
 reports remain saved. Continuing does not confirm identity or guarantee new results.
 
-Previously attempted page URLs and public queries are skipped automatically. Login
+Previously attempted page URLs and provider/query pairs are skipped automatically;
+the same public query can be tried on another selected provider. Login
 and access-barrier hosts are excluded from follow-up, with visible `-site:` search
 exclusions added when they fit the public query limit. The planner can follow saved
 leads from selected web, Wikipedia, Wikidata and news sources; fresh discovery uses
-public web search when selected. Individual provider/domain retries remain available
-in tool activity. A malformed plan, repeated ineligible choice or unavailable search
-can still leave a partial investigation, with its reason shown. Final continuation
+public web search when selected. Repeated or stalled planner choices trigger a
+different recovery strategy instead of immediately ending the run. A failed search
+provider is disabled for the remainder of that run; another configured provider can
+be used. Recovery choices and provider switches are visible in the plan and activity.
+Individual provider/domain retries remain available in tool activity, including an
+explicit choice of provider for a web search. Exhausted eligible sources, unavailable
+providers or unresolved uncertainty can still leave a partial investigation, with
+the stop reason shown. The request ceiling, deadline and **Stop** bound recovery.
+Final continuation
 drafting reads saved evidence locally and cannot launch more network tools.
+
+With a chosen public context, local AI also compares readable collected pages
+against the target role/location and private clues. Likely namesakes stay saved
+but do not fill the useful-page goal. Editing context lets the next continuation
+reconsider that derived assessment without fetching originals again. Missing
+context alone does not establish a mismatch; uncertain candidates remain labelled
+unconfirmed. Login walls and empty shells never become useful through this step.
+
+Open **Recovery settings and AI prompts** to choose DuckDuckGo Lite, Bing or both.
+Both are enabled by default; deselect a provider to keep automatic search and
+recovery from using it. Each request names its provider in tool activity, and
+**Edit & retry** lets you switch providers for an individual search.
+
+The six local prompts cover planning, repetition, provider failure, no useful pages,
+identity ambiguity and the final draft. Edit the guidance to suit the investigation;
+each prompt accepts up to 4,000 characters, with a combined 12,000-character limit.
+Settings are saved with local run options
+and carried into continuations. **Restore recovery defaults** changes the current
+form only; it does not alter saved reports, sources or start collection. New runs and
+continuations use the values currently in the form.
+
+Prompts guide the local model but cannot expand allowed tools, public providers,
+outbound query scope or private-data handling. Known private identifiers remain local
+comparison context. Custom prompts are stored with local run settings and can appear
+in exports; keep private identifying clues in **Known identifiers** rather than
+embedding them in prompt text. Guidance cannot guarantee useful results or identity.
 
 Install [llama.cpp](https://github.com/ggml-org/llama.cpp) and download the model once:
 
@@ -160,7 +207,7 @@ The app provides these tools; you do not need to install an extra tool server:
 
 | Tool | Capability |
 | --- | --- |
-| `web_search` | Send a subject-scoped query to DuckDuckGo Lite and discover public sources |
+| `web_search` | Send a subject-scoped query through a configured public provider and discover sources |
 | `search_subject` | Read this run's public candidate search results |
 | `news_search` | Read this run's recent news search results |
 | `collect_page` | Collect a relevant discovered URL or approved link from a collected page |
@@ -208,7 +255,7 @@ servers and unrelated llama.cpp sessions are left alone.
 
 | Source | Collected signal | What goes outside your machine |
 | --- | --- | --- |
-| DuckDuckGo Lite | Up to 10 public web results per search | Full query, including chosen public context; AI's approved query refinements |
+| Configured DuckDuckGo Lite / Bing public search | Up to 10 public web results per search | Full query, including chosen public context; AI's approved query refinements |
 | Wikipedia / Wikidata | Candidates, profiles, relationship labels and a page | Subject name or first alias; selected public IDs and page requests |
 | GDELT / linked news sites | Up to 8 recent mentions; up to 2 article pages | Quoted subject name; selected article requests |
 | Local comparator and llama.cpp (optional) | Compare private known clues with public results; draft summary | Nothing: local comparison and authenticated loopback; cached model only |
@@ -345,6 +392,8 @@ See [design and acceptance](docs/design.md), [validation evidence](docs/validati
 and [contributing](CONTRIBUTING.md).
 
 Primary protocol references: [DuckDuckGo non-JavaScript search](https://duckduckgo.com/duckduckgo-help-pages/features/non-javascript),
+[Bing search operators](https://support.microsoft.com/en-us/bing/advanced-search-keywords),
+[nginx proxy directives](https://nginx.org/en/docs/http/ngx_http_proxy_module.html),
 [IANA RDAP bootstrap registry](https://www.iana.org/assignments/rdap-dns/),
 [RDAP query format](https://www.rfc-editor.org/rfc/rfc9082.html),
 [MediaWiki search API](https://www.mediawiki.org/wiki/API:Search), and

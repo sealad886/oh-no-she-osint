@@ -4,10 +4,12 @@ import base64
 import binascii
 import hmac
 import json
+import re
 import secrets
 import socket
 import sqlite3
 import threading
+import time
 from http.cookies import SimpleCookie, CookieError
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -26,22 +28,100 @@ class LocalServer(ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = 8
 
-    def __init__(self, engine, port=0, allow_network=False, model_path=None):
+    def __init__(self, engine, port=0, allow_network=False, model_path=None, shutdown_on_close=False,
+                 page_timeout=90, launch_grace=120, close_grace=2):
         self.engine = engine
         self.allow_network = allow_network
         self.token = secrets.token_urlsafe(32)
         self.slots = threading.BoundedSemaphore(8)
+        self.shutdown_on_close = shutdown_on_close
+        self.page_timeout, self.launch_grace = page_timeout, launch_grace
+        self.page_close_grace = close_grace
+        self._page_lock = threading.RLock()
+        self._page_leases = {}
+        self._page_seen = False
+        self._page_started = time.monotonic()
+        self._page_shutdown_started = False
+        self._page_close_deadline = None
+        self._lifecycle_stop = threading.Event()
+        self._watchdog = None
+        self._close_lock = threading.Lock()
+        self._runtime_closed = False
         super().__init__(("127.0.0.1", port), Handler)
         self.origin = f"http://127.0.0.1:{self.server_port}"
         self.host = f"127.0.0.1:{self.server_port}"
         self.ai = LocalAI(engine, model_path)
         self.jobs = Jobs(engine, allow_network, self.ai)
+        if shutdown_on_close:
+            self._watchdog = threading.Thread(target=self._watch_pages, name='osint-page-watchdog', daemon=True)
+            self._watchdog.start()
 
     def server_close(self):
-        if hasattr(self, 'jobs'):
-            self.jobs.close()
-            self.ai.stop()
-        super().server_close()
+        with self._close_lock:
+            if self._runtime_closed:
+                return
+            self._runtime_closed = True
+            self._lifecycle_stop.set()
+        if self._watchdog and self._watchdog is not threading.current_thread():
+            self._watchdog.join(timeout=2)
+        try:
+            if hasattr(self, 'jobs'):
+                self.jobs.close()
+        finally:
+            try:
+                if hasattr(self, 'ai'):
+                    self.ai.stop()
+            finally:
+                super().server_close()
+
+    def _request_page_shutdown(self):
+        # shutdown() waits for serve_forever(); never call it from an HTTP handler's serving thread.
+        with self._page_lock:
+            if not self.shutdown_on_close or self._page_shutdown_started or self._lifecycle_stop.is_set():
+                return
+            self._page_shutdown_started = True
+        threading.Thread(target=self.shutdown, name='osint-page-shutdown', daemon=True).start()
+
+    def page_lifecycle(self, action, data):
+        if set(data) != {'id'} or not isinstance(data['id'], str) or not re.fullmatch(
+                r'[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}', data['id']):
+            raise InvalidInput('Page lifecycle requests require one browser UUID.')
+        page_id = data['id'].lower()
+        with self._page_lock:
+            if self._page_shutdown_started:
+                raise InvalidInput('This app session is closing. Relaunch the app for a new session.')
+            known = page_id in self._page_leases
+            if action == 'open':
+                if not known and len(self._page_leases) >= 32:
+                    raise InvalidInput('This app session supports up to 32 open pages.')
+                self._page_leases[page_id] = time.monotonic()
+                self._page_seen = True
+                self._page_close_deadline = None
+                known = True
+            elif action == 'heartbeat' and known:
+                self._page_leases[page_id] = time.monotonic()
+            elif action == 'close' and known:
+                del self._page_leases[page_id]
+                if not self._page_leases:
+                    # Reload and same-app navigation also emit pagehide. Give the new document time to register.
+                    self._page_close_deadline = time.monotonic() + self.page_close_grace
+            return {'ok': True, 'registered': known if action != 'close' else False,
+                    'pages': len(self._page_leases), 'closing': self._page_shutdown_started}
+
+    def _watch_pages(self):
+        interval = max(0.02, min(0.25, self.page_timeout / 3, self.launch_grace / 3, self.page_close_grace / 3))
+        while not self._lifecycle_stop.wait(interval):
+            with self._page_lock:
+                current = time.monotonic()
+                expired = [page_id for page_id, heartbeat in self._page_leases.items()
+                           if current - heartbeat >= self.page_timeout]
+                for page_id in expired:
+                    del self._page_leases[page_id]
+                if (self._page_seen and not self._page_leases and (
+                        self._page_close_deadline is None or current >= self._page_close_deadline)) or (
+                        not self._page_seen and current - self._page_started >= self.launch_grace):
+                    self._request_page_shutdown()
+                    return
 
     def get_request(self):
         sock, address = super().get_request()
@@ -178,6 +258,11 @@ class Handler(BaseHTTPRequestHandler):
             if method == "GET":
                 if path == "/api/status":
                     self.reply(200, {"network": self.server.allow_network, "max_bytes": MAX_BYTES, "version": "0.1.0"})
+                elif path == "/api/prompts":
+                    from .prompts import DEFAULT_PROMPTS
+                    from .collector import SEARCH_PROVIDERS
+                    self.reply(200, {'defaults': DEFAULT_PROMPTS, 'providers': [
+                        {'id': key, 'label': label} for key, label in SEARCH_PROVIDERS.items()]})
                 elif path == "/api/cases":
                     self.reply(200, engine.cases())
                 elif path == "/api/view":
@@ -199,7 +284,9 @@ class Handler(BaseHTTPRequestHandler):
                     self.reply(404, {"error": "Endpoint not found."})
             elif method == "POST":
                 data = self.body()
-                if path == "/api/cases":
+                if path in {'/api/page/open', '/api/page/heartbeat', '/api/page/close'}:
+                    self.reply(200, self.server.page_lifecycle(path.rsplit('/', 1)[-1], data))
+                elif path == "/api/cases":
                     self.reply(201, engine.create_case(data.get("name"), data.get("focus_type", "topic"), data.get("aliases"), data.get("identifiers")))
                 elif path == "/api/investigate":
                     self.reply(202, self.server.jobs.start(data.get('case'), data.get('ai', False), data.get('options')))

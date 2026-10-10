@@ -6,7 +6,9 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import signal
 import sys
+import threading
 import tomllib
 import webbrowser
 
@@ -14,6 +16,7 @@ from .collector import collect, research, discover
 from .engine import Engine, InvalidInput, MAX_BYTES
 from .server import LocalServer
 from .investigation import Investigation
+from .nginx import NginxProxy
 
 
 def write_private(path, value):
@@ -31,6 +34,10 @@ def parser():
         sub.add_argument("--data-dir", help="Private data directory (default: .local-osint)")
         sub.add_argument("--config", type=Path, help="Optional TOML file with data_dir and port")
         if name == "serve":
+            proxy = sub.add_mutually_exclusive_group()
+            proxy.add_argument("--nginx", action="store_true", help="Run an app-owned loopback nginx server in front of Python")
+            proxy.add_argument("--direct", dest="nginx", action="store_false", help="Explicitly use the direct Python server")
+            sub.set_defaults(nginx=False)
             sub.add_argument("--model", type=Path, help="Optional local GGUF for click-to-start llama.cpp; no download")
             sub.add_argument("--port", type=int, help="Local port (default: automatic; 0 chooses a free port)")
             sub.add_argument("--allow-network", action="store_true", help="Permit explicitly requested public signal collection")
@@ -97,24 +104,55 @@ def settings(args):
     return directory, port
 
 
+def terminate_launcher(signum, frame):
+    raise KeyboardInterrupt
+
+
+def serve(engine, args, port):
+    proxy = None
+    worker = None
+    with LocalServer(engine, 0 if args.nginx else port, args.allow_network, args.model, shutdown_on_close=True) as server:
+        try:
+            if args.nginx:
+                proxy = NginxProxy(engine.directory, server.server_port, port)
+                proxy.start()
+                server.origin = proxy.origin
+                server.host = f"127.0.0.1:{proxy.port}"
+            worker = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.2}, name="local-osint-server", daemon=True)
+            worker.start()
+            link = server.origin + "/#token=" + server.token
+            mode = "App-owned nginx server. " if proxy else "Direct Python server. "
+            print("Local OSINT ready. " + mode + ("Public HTTPS collection enabled." if args.allow_network else "Offline mode; web collection disabled."), flush=True)
+            print("Private launch link (keep it on this machine): " + link, flush=True)
+            print("Close the app page or stop with Ctrl+C. Evidence remains in your private data directory.", flush=True)
+            if args.open:
+                webbrowser.open(link)
+            while worker.is_alive():
+                worker.join(timeout=0.2)
+                if proxy and proxy.process.poll() is not None:
+                    raise InvalidInput("The app's nginx server stopped. Run ./start.sh again; saved evidence remains available.")
+        except KeyboardInterrupt:
+            pass
+        finally:
+            if worker and worker.is_alive():
+                server.shutdown()
+                worker.join(timeout=3)
+            if proxy:
+                proxy.stop()
+    return 0
+
+
 def main(argv=None):
     args = parser().parse_args(argv)
     try:
         directory, port = settings(args)
         engine = Engine(directory)
         if args.command == "serve":
-            with LocalServer(engine, port, args.allow_network, args.model) as server:
-                link = server.origin + "/#token=" + server.token
-                print("Local OSINT ready. " + ("Public HTTPS collection enabled." if args.allow_network else "Offline mode; web collection disabled."), flush=True)
-                print("Private launch link (keep it on this machine): " + link, flush=True)
-                print("Stop with Ctrl+C. Evidence remains in your private data directory.", flush=True)
-                if args.open:
-                    webbrowser.open(link)
-                try:
-                    server.serve_forever(poll_interval=0.2)
-                except KeyboardInterrupt:
-                    pass
-            return 0
+            previous_termination = signal.signal(signal.SIGTERM, terminate_launcher)
+            try:
+                return serve(engine, args, port)
+            finally:
+                signal.signal(signal.SIGTERM, previous_termination)
         if args.command == "case":
             result = engine.create_case(args.name, args.type, args.alias, args.identifier)
         elif args.command == "cases":

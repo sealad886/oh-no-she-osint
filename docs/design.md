@@ -345,3 +345,49 @@ Retrospective: continuation recovers a workflow and preserves evidence; it canno
 manufacture public corroboration or make an unavailable provider work. Visible
 planner errors and precise stop reasons are required recovery outcomes. A partial
 native investigation must remain partial even when the software checks pass.
+
+## Adaptive recovery correction (2026-10-10)
+
+Accepted change: AI repetition and provider failure must trigger different public
+work, rather than terminate a continuation. Keep all prior originals, exclude
+failed/login hosts, distinguish namesakes locally, and support every defined
+subject type. Users can choose DuckDuckGo/Bing and edit six local prompt stages.
+Mandatory privacy, URL scope, cancellation and resource guards remain enforced
+outside configurable prompts.
+
+Design: track attempted (provider, normalized query) pairs; retire unavailable
+providers for the current run. Offer a finite, target-aware queue that broadens
+optional public context and changes source keywords. Validate every model and
+engine query through the same private-clue guard. Invalid, repeated or premature
+finish decisions fall back to eligible untried pages or fresh queued searches.
+Successful searches feed ranked collection before more searching. Stop only at
+the useful-page goal, chosen request ceiling, deadline, cancellation or actual
+exhaustion of eligible providers/queries/pages. Expose stage, provider, blocked
+proposal and engine fallback in persisted tool/planner activity.
+
+Checklist complete: discovery/design, implementation, behavioral and native
+verification, independent review and documentation. Focused local commit remains
+the handoff action. The native investigation still has no corroborated target
+page; evidence retention and recovery execution do not establish identity.
+No schema conversion needed: settings live in additive report JSON; existing
+originals are preserved. No external publication or new worktree authorized.
+
+## Local nginx and page lifetime (2026-10-10)
+
+Additional explicit user requirements: own nginx front end, and tear down all
+app-owned background work when the browser page closes or leaves the app.
+Canonical launcher runs a dedicated foreground nginx master and one worker,
+private generated configuration and temporary files, on 127.0.0.1. Python serves the authenticated
+API on a separate ephemeral loopback port. Host/Origin checks use the actual
+browser-facing origin; no global nginx configuration or background service is
+used. Explicit direct mode remains useful for installations without nginx.
+
+Authenticated per-tab leases track live pages. Last close triggers shutdown after
+a short refresh grace; opening a replacement page cancels that shutdown. Heartbeat
+expiry covers crashes, while a generous lease avoids ordinary background timer
+throttling. Shutdown cancels investigations, stops only the owned model child and
+nginx process group, and closes the API listener. Durable original evidence stays
+intact.
+Browser cleanup delivery is best effort; lease expiry is the fallback. Native
+verification must distinguish source tests, real nginx routing, model ownership,
+refresh, multiple tabs and actual page navigation teardown.

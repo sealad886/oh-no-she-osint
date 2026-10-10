@@ -2,8 +2,11 @@
 
 Use Python 3.11+ and a project-specific `.venv`; no global package installs.
 Run the commands under Development in README before submitting a change.
-Runtime uses only Python's standard library and static browser assets. Adding a
-runtime dependency needs an actual requirement and a privacy/supply-chain assessment.
+Python runtime uses only its standard library and static browser assets. The
+canonical launcher also requires an installed nginx binary; it owns a private
+foreground process, never a shared service. Native nginx tests skip explicitly
+when the binary is unavailable. Adding another runtime dependency needs an actual
+requirement and a privacy/supply-chain assessment.
 
 The engine owns case/evidence semantics. CLI and server must reuse it. Collectors
 share public-address validation and pinned TLS transport. Never add a shortcut

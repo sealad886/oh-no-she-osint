@@ -457,3 +457,76 @@ were restored to ready state. No further Eric provider run was launched: blocked
 sites and uncorroborated identity require different public leads/context, and
 larger numeric settings alone cannot establish identity or guarantee coverage.
 The refreshed UI proof excludes the private case header.
+
+## Adaptive strategy recovery, nginx and page lifetime (2026-10-10)
+
+The repeated-query/two-search-failure stop rules have been removed. Recovery now
+tracks provider/query pairs, retires failing providers for the run and dispatches
+fresh public strategies or eligible pages when the model repeats, rejects an
+instruction or finishes prematurely. Public context can be broadened while the
+complete subject/alias and private-clue guards remain enforced. All five focus
+kinds have deterministic fallback coverage. Six bounded local prompt stages and
+provider choices are editable and persisted in report options.
+
+Root final verification: **211 tests passed in 18.784 seconds**. Independent final
+verification: **211 passed in 18.114 seconds**, with no skips/failures, plus clean
+whitespace checks. Python compilation, JavaScript syntax and launcher shell checks
+passed. The suite includes actual installed nginx 1.31.6 routing/authentication,
+Host/Origin/body limits, SIGTERM cleanup, final-page closure, multiple-page leases,
+refresh grace, heartbeat expiry, unknown/unauthenticated closure and evidence
+retention. Provider parsing/privacy/repetition cases use controlled fixtures.
+A separate native Bing collection through the actual pinned HTTPS transport
+returned seven organic HTTPS results for a public Ada Lovelace query.
+
+Independent review's first adaptive/runtime pass found no material issue. The
+subsequent page-context pass reproduced and repaired two P2 defects: only ten
+retained pages were reassessed, and edited context could not revive substantive
+pages previously rejected as namesakes. Final reassessment covers all candidates
+in batches of ten and keeps original quality separate from the local context
+verdict. Cache and current-run activity summaries share that verdict. Eleven-page,
+corrected-context, login-shell and immutable-original regressions pass. No
+outstanding material review finding remains in this bounded scope. Final reviewed
+source/test/launcher/manifest hash is
+`6d20cf77938fb97f4659194ed02e1832d2916f7ffc6071b13bd8e35418117a29`,
+using sorted relative path + NUL + contents + NUL. Documentation receipts follow
+source review; this is not exhaustive security certification or factual identity
+acceptance.
+
+Canonical browser startup used dedicated foreground nginx and an ephemeral
+loopback Python backend. No Homebrew service was started; no shared nginx config
+was loaded. Actual browser navigation away from the last app page exited the
+launcher with status zero, stopped the ownership-verified backend/nginx/local-model
+PIDs, and closed all three listener ports. Existing evidence stayed on disk.
+Actual refresh reconnected without runtime shutdown, and closing a temporary second
+app tab preserved the first tab's investigation. A custom planning prompt survived
+case reload, browser refresh and the next continuation.
+
+The first live continuation retained all fourteen parent source IDs and verified
+all fourteen original hashes. Repeated affiliation planning was blocked and
+recovered with a genuine Bing query, then both engines and fresh strategies.
+It executed fifteen new searches and seven page attempts in twenty-two collection
+units before the 300-second soft deadline. Private-clue query echoes were zero.
+Three substantive pages belonged to a likely scientific namesake, exposing a
+relevance gap: the comparator lacked the chosen public role/location context.
+The corrected comparator receives that context locally and reassesses saved page
+text without changing originals. Native corrected-run results follow below.
+
+The corrected native continuation used the installed local llama.cpp model to
+exclude all three scientific namesake pages using the chosen public role/location
+context. It executed fifteen fresh searches across both engines, consuming fifteen
+collection units, and stopped at the 300-second soft deadline with **zero useful
+target pages**. It retained all **34** parent source references and verified all
+**34** original byte hashes. No saved private clue appeared in the observed search
+queries. This run proves actual local comparison and continued public recovery;
+it does not establish target identity or a completed AI draft. Provider results
+offered no eligible untried target page to collect during this run.
+
+The final nginx correction uses the documented foreground master/worker mode and
+stops its owned process group. Native tests verify both processes disappear after
+teardown. POSIX/macOS behavior was exercised; the non-POSIX fallback was inspected
+but not run. The final app was restored in the browser on an automatically chosen
+free port; explicit occupied-port rejection preserved the existing listener.
+
+Graphify AST refresh completed with 744 nodes, 1,930 edges and 28 communities;
+no paid semantic graph calls were made. Environment-specific provider availability,
+model categorization and target identity remain separate from test success.

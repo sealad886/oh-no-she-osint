@@ -14,6 +14,9 @@ from urllib.parse import parse_qs, quote, urlencode, urljoin, urlsplit, urlunspl
 from .engine import InvalidInput, MAX_BYTES
 
 
+SEARCH_PROVIDERS = {"duckduckgo": "DuckDuckGo", "bing": "Bing"}
+
+
 def public_address(value):
     address = ipaddress.ip_address(value)
     # Reject IPv4-mapped and transition addresses; avoid alternate routing to private networks.
@@ -216,12 +219,69 @@ class SearchHTML(HTMLParser):
             self.size += len(part)
 
 
-def search_result_url(value):
+class BingSearchHTML(HTMLParser):
+    """Read headings and snippets only inside Bing's organic result items."""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.results = []
+        self.stack = []
+        self.result_depth = None
+        self.heading_depth = None
+        self.capture = None
+        self.capture_depth = None
+        self.parts = []
+        self.size = 0
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag in {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}:
+            return
+        self.stack.append(tag)
+        depth = len(self.stack)
+        if tag == "li" and "b_algo" in attrs.get("class", "").split() and len(self.results) < 30:
+            self.results.append({"title": "", "url": "", "snippet": ""})
+            self.result_depth = depth
+        if self.result_depth is None:
+            return
+        if tag == "h2":
+            self.heading_depth = depth
+        if self.capture is None and tag == "a" and self.heading_depth and not self.results[-1]["url"]:
+            self.results[-1]["url"] = attrs.get("href", "")
+            self.capture = "title"
+        elif self.capture is None and tag == "p" and not self.results[-1]["snippet"]:
+            self.capture = "snippet"
+        else:
+            return
+        self.capture_depth, self.parts, self.size = depth, [], 0
+
+    def handle_endtag(self, tag):
+        if tag not in self.stack:
+            return
+        depth = len(self.stack) - self.stack[::-1].index(tag)
+        if self.capture is not None and depth <= self.capture_depth:
+            limit = 300 if self.capture == "title" else 1000
+            self.results[-1][self.capture] = " ".join("".join(self.parts).split())[:limit]
+            self.capture = self.capture_depth = None
+        if self.heading_depth and depth <= self.heading_depth:
+            self.heading_depth = None
+        if self.result_depth and depth <= self.result_depth:
+            self.result_depth = None
+        del self.stack[depth - 1:]
+
+    def handle_data(self, data):
+        if self.capture is not None and self.size < 2000 and not {"script", "style"}.intersection(self.stack):
+            part = data[:2000 - self.size]
+            self.parts.append(part)
+            self.size += len(part)
+
+
+def search_result_url(value, provider="duckduckgo"):
     """Decode a search redirect locally; never request the search wrapper."""
     if not isinstance(value, str) or len(value) > 8000:
         return None
     try:
-        wrapper = urlsplit(urljoin("https://lite.duckduckgo.com/", value))
+        base = "https://www.bing.com/" if provider == "bing" else "https://lite.duckduckgo.com/"
+        wrapper = urlsplit(urljoin(base, value))
         if wrapper.hostname in {"duckduckgo.com", "html.duckduckgo.com", "lite.duckduckgo.com"}:
             if wrapper.path != "/l/":
                 return None
@@ -229,20 +289,30 @@ def search_result_url(value):
             if len(values) != 1:
                 return None
             value = values[0]
+        elif wrapper.hostname in {"bing.com", "www.bing.com"}:
+            if provider != "bing" or wrapper.path != "/ck/a":
+                return None
+            values = parse_qs(wrapper.query, max_num_fields=20).get("u", [])
+            if len(values) != 1 or not re.fullmatch(r"a1[A-Za-z0-9_-]+={0,2}", values[0]):
+                return None
+            encoded = values[0][2:]
+            value = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode("ascii")
         elif value.startswith("//"):
             value = wrapper.geturl()
         # Fragments select in-page content and never reach the server.
         value = value.split("#", 1)[0]
         value = quote(value, safe=":/?=&;%+@!$'()*,-._~[]")
         host, _, canonical = public_url(value, allow_query=True)
-        if host == "duckduckgo.com" or host.endswith(".duckduckgo.com"):
+        if host in {"duckduckgo.com", "bing.com"} or host.endswith((".duckduckgo.com", ".bing.com")):
             return None
         return canonical
     except (InvalidInput, ValueError):
         return None
 
 
-def parse_search(raw):
+def parse_search(raw, provider="duckduckgo"):
+    if not isinstance(provider, str) or provider not in SEARCH_PROVIDERS:
+        raise InvalidInput("Choose a supported public search provider.")
     if len(raw) > MAX_BYTES:
         raise InvalidInput("Search response exceeds the 2 MiB evidence limit.")
     try:
@@ -250,44 +320,49 @@ def parse_search(raw):
     except UnicodeDecodeError as exc:
         raise InvalidInput("Search source did not return UTF-8 HTML.") from exc
     lower = text.lower()
-    if any(marker in lower for marker in ("anomaly.js", "anomaly-modal", "challenge-form")):
-        raise InvalidInput("Search provider requires a human check. Open DuckDuckGo in your browser or retry later; no challenge bypass is attempted.")
-    parser = SearchHTML()
+    challenges = ("anomaly.js", "anomaly-modal", "challenge-form") if provider == "duckduckgo" else ("b_captcha", "b_captch", "captchaform", 'id="challenge-form"')
+    if any(marker in lower for marker in challenges):
+        raise InvalidInput(f"Search provider requires a human check. Open {SEARCH_PROVIDERS[provider]} in your browser or retry later; no challenge bypass is attempted.")
+    parser = BingSearchHTML() if provider == "bing" else SearchHTML()
     parser.feed(text)
     parser.close()
     results, seen = [], set()
     for result in parser.results:
-        url = search_result_url(result["url"])
+        url = search_result_url(result["url"], provider)
         if not url or url in seen:
             continue
         seen.add(url)
         results.append({**result, "url": url})
         if len(results) == 10:
             break
-    if not results and not any(marker in lower for marker in ("no-results", "no results found", "no more results")):
+    no_results = ("no-results", "no results found", "no more results") if provider == "duckduckgo" else ('class="b_no"', 'class="b_no ', "no results found for", "there are no results for")
+    if not results and not any(marker in lower for marker in no_results):
         raise InvalidInput("Search response could not be interpreted. The provider may have changed its page or blocked this request.")
     return results
 
 
-def web_search(engine, case_id, query, enabled=False):
+def web_search(engine, case_id, query, enabled=False, provider="duckduckgo"):
     """No-key public web search; preserve the original search page as evidence."""
     if not enabled:
         raise InvalidInput("Collection is off. Restart with --allow-network to enable it.")
+    if not isinstance(provider, str) or provider not in SEARCH_PROVIDERS:
+        raise InvalidInput("Choose a supported public search provider.")
     with engine.connection() as db:
         engine.require_case(db, case_id)
     from .engine import field
     query = field(query, "Web search query", 200)
-    url = "https://lite.duckduckgo.com/lite/?" + urlencode({"q": query})
+    base = "https://www.bing.com/search?" if provider == "bing" else "https://lite.duckduckgo.com/lite/?"
+    url = base + urlencode({"q": query})
     raw, format, canonical = fetch_public(url, allow_query=True)
-    if format != "html":
-        raise InvalidInput("Search source did not return HTML.")
-    saved = engine.ingest(case_id, raw, generated_title("Web search: " + query), canonical, "html")
+    saved = engine.ingest(case_id, raw, generated_title(SEARCH_PROVIDERS[provider] + " search: " + query), canonical, format)
     try:
-        results = parse_search(raw)
+        if format != "html":
+            raise InvalidInput("Search source did not return HTML.")
+        results = parse_search(raw, provider)
     except InvalidInput as exc:
         exc.evidence_id = saved["id"]
         raise
-    return {"query": query, "results": results, **saved}
+    return {"query": query, "provider": provider, "results": results, **saved}
 
 
 SIGNALS = {"dns", "registration", "certificate", "website"}

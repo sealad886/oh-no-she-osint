@@ -10,6 +10,11 @@ assess evidence before attributing it to a person or organization.
 ## Controls
 
 - Listener binds only `127.0.0.1`; no option permits LAN or internet binding.
+- Canonical launch owns a foreground nginx master and one worker on loopback, forwarding to
+  an ephemeral loopback API listener. Generated config and temporary files live
+  in an owner-only app directory; no shared nginx includes, services, access
+  logs, caches or third-party static routes are used. The actual browser Host
+  and Origin remain subject to the same authenticated API checks.
 - Each process creates a random 256-bit session capability. Launch link carries it
   in a fragment, exchanged for an HttpOnly, SameSite=Strict session cookie.
   The UI immediately removes the fragment. Restart invalidates previous sessions.
@@ -36,13 +41,21 @@ assess evidence before attributing it to a person or organization.
 - Collection requires a process-level flag and an explicit user action. Offline
   mode rejects all collection paths before DNS or connection. Built-in discovery
   and news search construct query parameters for fixed public providers. Real web
-  search sends a user-approved query to DuckDuckGo Lite without an API key.
+  search sends approved public queries to selected DuckDuckGo Lite or Bing
+  public HTML endpoints without an API key. Provider failure retires that
+  provider for the run; another selected provider can be tried.
   Investigation/page tools permit query parameters on selected public URLs;
   standalone CLI `fetch` rejects them. Queries are outbound data, including those
   received from links or redirects, and can contain tracking values. URL credentials
   and fragments remain prohibited.
 - No HTTP access logs, analytics, cloud storage, cloud AI calls, CDN dependencies,
   or environment TLS key logging. CLI errors suppress private filesystem details.
+- Authenticated per-tab leases authorize runtime lifetime. Final page departure
+  starts a two-second reload grace; missing heartbeats expire after 90 seconds.
+  Unknown page IDs cannot close registered pages. Cleanup cancels app jobs and
+  stops only the owned model/proxy children, closing both API/proxy listeners.
+  Browser close delivery is best effort; lease expiry covers crashes. Persistent
+  evidence is kept, and unfinished checkpoints recover as interrupted at restart.
 
 ## Automatic collection and model boundary
 
@@ -99,12 +112,17 @@ cached local model. Planning responses are strict bounded JSON selecting a publi
 search, an eligible untried page, or exhaustion. Saved source IDs, raw bytes and prior
 tool history carry forward; useful pages count cumulatively and collection uses a
 fresh user-selected request ceiling and 300-second soft deadline. Each executed
-collection action consumes that ceiling. Cancellation, model errors, repeated invalid
-choices and repeated unavailable searches stop further planning while retaining
+collection action consumes that ceiling. Repeated or invalid model choices trigger
+validated engine fallbacks, broadening public context or switching selected
+providers. Unavailable providers are retired for the run. Cancellation, deadline,
+request ceiling or exhaustion of eligible strategies/pages stops recovery, retaining
 evidence. An in-flight model or provider request may finish before a stop takes effect.
 
 Continuation restores only case-approved source URLs, respects selected source
-categories, skips attempted URLs/queries and excludes access/login-barrier hosts.
+categories, skips attempted URLs and provider/query pairs, and excludes
+access/login-barrier hosts. The same public query may be tried on another selected
+provider. Editable stage prompts stay local and cannot override dispatcher,
+private-clue, provider, URL or resource checks. Model conclusions remain unverified.
 Visible public `-site:` terms ask the search provider for alternatives; these terms
 are bounded and revalidated against the same public vocabulary and private-clue
 guard. Planner reasons and rejected arguments use the private-output guard.

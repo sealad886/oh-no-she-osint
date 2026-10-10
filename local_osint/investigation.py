@@ -14,6 +14,7 @@ from . import collector
 from .engine import InvalidInput, now, field
 from .page_quality import assess_page
 from .relevance import local_match, rank_key, words, outbound_private_clues
+from .prompts import validate_prompts
 
 REPORT_SOURCE = 'local-osint:investigation-report'
 PROPERTIES = {'P31': 'Type', 'P856': 'Official website (candidate claim)', 'P17': 'Country',
@@ -29,12 +30,16 @@ MAX_SAFE_INTEGER = 2 ** 53 - 1  # Preserve exact values in the browser's JSON nu
 
 def options_for(case, values=None):
     values = {} if values is None else values
-    if not isinstance(values, dict) or set(values) - {'query', 'context', 'tools', 'max_requests', 'page_limit'}:
+    if not isinstance(values, dict) or set(values) - {'query', 'context', 'tools', 'max_requests', 'page_limit', 'providers', 'prompts'}:
         raise InvalidInput('Invalid investigation settings.')
     result = {'query': field(values.get('query', ''), 'Public search query', 200, False) or '"' + case['name'] + '"',
               'context': field(values.get('context', ''), 'Public search context', 200, False),
               'tools': values.get('tools', ['web_search', 'wikipedia', 'wikidata', 'news', 'domain']),
-              'max_requests': values.get('max_requests', 24), 'page_limit': values.get('page_limit', 4)}
+              'max_requests': values.get('max_requests', 24), 'page_limit': values.get('page_limit', 4),
+              'providers': values.get('providers', list(collector.SEARCH_PROVIDERS)),
+              'prompts': validate_prompts(values.get('prompts'))}
+    if not isinstance(result['providers'], list) or not result['providers'] or any(not isinstance(p, str) or p not in collector.SEARCH_PROVIDERS for p in result['providers']) or len(set(result['providers'])) != len(result['providers']):
+        raise InvalidInput('Select supported search providers without duplicates.')
     if not isinstance(result['tools'], list) or not result['tools'] or any(not isinstance(t, str) or t not in SOURCES for t in result['tools']) or len(set(result['tools'])) != len(result['tools']):
         raise InvalidInput('Select at least one supported source, without duplicates.')
     for name in ['max_requests', 'page_limit']:
@@ -118,6 +123,8 @@ class Investigation:
         self.used = 0
         self.allowed_urls, self.allowed_domains = set(), set()
         self.pages, self.domains = {}, {}
+        self.failed_providers = set()
+        self.active_provider = self.options['providers'][0]
         self.continuing = continuing
         self.report = {'report_type': 'investigation', 'run_id': run_id or uuid.uuid4().hex,
                        'case_id': case_id, 'subject': self.case['name'], 'aliases': self.case['aliases'], 'focus_type': self.case['focus_type'],
@@ -236,7 +243,9 @@ class Investigation:
         from .ai import private_output
         query = field(query, 'Web search query', 200)
         allowed = set(words(self.case['name'] + ' ' + ' '.join(self.case['aliases']) + ' ' + self.options['query'] + ' ' + self.options['context']))
-        allowed.update('profile linkedin github company news interview about contact research portfolio official website biography'.split())
+        from .recovery import SEARCH_WORDS
+        allowed.update(SEARCH_WORDS)
+        allowed.update('linkedin github contact biography'.split())
         for domain in self.allowed_domains:
             allowed.update(words(domain))
         for url in self.allowed_urls:
@@ -257,11 +266,16 @@ class Investigation:
             raise InvalidInput('AI searches must use the subject name and approved public context or source domains.')
         return query
 
-    def web_search(self, query):
+    def web_search(self, query, provider=None):
         if not self.enabled:
             raise InvalidInput('Web collection is off for this app session.')
-        result = self.step('Web search: ' + query, lambda: collector.web_search(self.engine, self.case_id, query, True),
-                           tool='web_search', arguments={'query': query})
+        provider = provider or self.active_provider
+        if provider not in self.options['providers']:
+            raise InvalidInput('Search provider is not selected.')
+        self.active_provider = provider
+        collect = (lambda: collector.web_search(self.engine, self.case_id, query, True)) if provider == 'duckduckgo' else (lambda: collector.web_search(self.engine, self.case_id, query, True, provider=provider))
+        result = self.step('Web search (' + collector.SEARCH_PROVIDERS[provider] + '): ' + query, collect,
+                           tool='web_search', arguments={'query': query, 'provider': provider})
         if result:
             current_results = []
             for item in result['results']:
@@ -287,6 +301,7 @@ class Investigation:
             self.report['web_results'].sort(key=rank_key, reverse=True)
             self.publish()
             return {**result, 'results': current_results}
+        self.failed_providers.add(provider)
         return {'error': 'Web search unavailable. See its tool activity and retry.', 'results': []}
 
     def compare_locally(self):
@@ -295,7 +310,7 @@ class Investigation:
         candidates = self.report['web_results'][:10]
         def compare():
             from .ai import compare_candidates
-            hints = compare_candidates(self.ai, self.case, candidates)
+            hints = compare_candidates(self.ai, {**self.case, 'public_context': self.options['context']}, candidates)
             for index, lead in enumerate(candidates):
                 lead['local_match']['model_assessment'] = hints.get(index, 'uncertain')
             self.report['web_results'].sort(key=rank_key, reverse=True)
@@ -312,6 +327,38 @@ class Investigation:
         result = self.engine.ingest(self.case_id, raw, collector.generated_title(title), canonical, format)
         self.remember(result)
         return {**result, 'raw': raw, 'format': format}
+
+    def compare_pages_locally(self, pages):
+        """Reassess readable namesakes locally; never change saved originals."""
+        eligible = [p for p in pages if (p.get('useful') or p.get('context_excluded') or p.get('content_relevant'))
+                    and p.get('local_match', {}).get('level') != 'identifier_match']
+        if not self.ai or not self.options['context'] or not eligible:
+            return
+        def compare(candidates):
+            from .ai import compare_candidates
+            hints = compare_candidates(self.ai, {**self.case, 'public_context': self.options['context']}, [
+                {'url': p['url'], 'title': self.case['name'], 'snippet': p.get('excerpt', ''),
+                 'local_match': p.get('local_match', {})} for p in candidates])
+            for index, page in enumerate(candidates):
+                hint = hints.get(index, 'uncertain')
+                page.setdefault('local_match', {})['model_assessment'] = hint
+                page.setdefault('content_relevant', bool(page.get('useful') or page.get('context_excluded')))
+                page.setdefault('content_quality_reason', page['quality_reason'])
+                if hint == 'context_unlikely':
+                    page.update(useful=False, context_excluded=True, quality_reason='Substantive public content, but local AI flags a likely namesake against chosen context. Identity remains unconfirmed.')
+                else:
+                    page.update(useful=page['content_relevant'], context_excluded=False,
+                                quality_reason=page['content_quality_reason'])
+                summary = ('Useful candidate page saved. ' if page['useful'] else 'Original saved; does not fill useful-page goal. ') + page['quality_reason']
+                if page['url'] in self.pages:
+                    self.pages[page['url']].update(useful=page['useful'], summary=summary)
+                for entry in self.report['steps']:
+                    if entry.get('tool') == 'collect_page' and entry.get('run_id') == self.report['run_id'] and entry.get('arguments', {}).get('url') == page['url'] and entry.get('ok'):
+                        entry['result_summary'] = summary
+            return {'summary': 'Saved page content compared with chosen public context and private clues locally; likely namesakes do not fill the useful-page goal.'}
+        for offset in range(0, len(eligible), 10):
+            batch = eligible[offset:offset + 10]
+            self.step('Local AI: assess collected pages against target context', lambda batch=batch: compare(batch), 0, 'analyze', {})
 
     def page(self, url):
         if not self.enabled:
@@ -334,7 +381,8 @@ class Investigation:
             hint = (lead or {}).get('local_match', {}).get('model_assessment')
             if hint:
                 match['model_assessment'] = hint
-            useful = quality['useful'] and (self.relevant(quality['text']) or match['level'] in {'identifier_match', 'context_match'})
+            content_relevant = quality['useful'] and (self.relevant(quality['text']) or match['level'] in {'identifier_match', 'context_match'})
+            useful = content_relevant
             if hint == 'context_unlikely' and match['level'] != 'identifier_match':
                 useful = False
             reason = quality['reason'] if not quality['useful'] else 'Substantive public content, but this is an unverified likely namesake.' if hint == 'context_unlikely' and not useful else 'Substantive content lacks subject or saved-clue corroboration.' if not useful else quality['reason']
@@ -356,7 +404,8 @@ class Investigation:
             self.allowed_urls.add(evidence['source'])
             page = {'url': url, 'final_url': evidence['source'], 'source_id': saved['id'], 'run_id': self.report['run_id'],
                     'excerpt': quality['text'][:1800], 'links': links, 'useful': useful,
-                    'quality_reason': reason, 'local_match': match}
+                    'quality_reason': reason, 'local_match': match, 'content_relevant': content_relevant,
+                    'content_quality_reason': quality['reason'], 'context_excluded': content_relevant and not useful}
             self.report['pages'] = [p for p in self.report['pages'] if p['url'] != url] + [page]
             for lead in self.report['web_results']:
                 if lead['url'] == url:
@@ -365,6 +414,10 @@ class Investigation:
                     'summary': ('Useful candidate page saved. ' if useful else 'Original saved; does not fill useful-page goal. ') + reason}
         result = self.step('Collect page: ' + url, collect_page, tool='collect_page', arguments={'url': url})
         self.pages[url] = result or {'error': self.report['steps'][-1].get('error', 'Page collection failed.')}
+        if result:
+            page = next(p for p in self.report['pages'] if p['url'] == url)
+            self.compare_pages_locally([page])
+            self.pages[url]['useful'] = page['useful']
         return self.pages[url]
 
     def cached_tool(self, label, result, tool, arguments):
@@ -402,17 +455,17 @@ class Investigation:
             self.domains[domain]['error'] = prefix + ' ' + '; '.join(r['signal'] + ': ' + r['error'] for r in failures)
         return self.domains[domain]
 
-    def dispatch(self, name, arguments):
+    def dispatch(self, name, arguments, origin='ai'):
         self.check()
         if not isinstance(arguments, dict):
             raise InvalidInput('Tool arguments must be an object.')
         old_origin = self.origin
-        self.origin = 'ai'
+        self.origin = origin
         try:
             if name in {'web_search', 'collect_page', 'domain_signals'} and not self.report['network_enabled']:
                 raise InvalidInput('This local analysis phase cannot call outbound tools.')
-            if name == 'web_search' and set(arguments) == {'query'} and 'web_search' in self.options['tools']:
-                return self.web_search(self.model_query(arguments['query']))
+            if name == 'web_search' and set(arguments) in ({'query'}, {'query', 'provider'}) and 'web_search' in self.options['tools']:
+                return self.web_search(self.model_query(arguments['query']), arguments.get('provider'))
             if name in {'search_subject', 'news_search'} and not arguments:
                 return self.step('Read collected ' + name, lambda: {'candidates': self.report['candidates']} if name == 'search_subject' else {'articles': self.report['articles']}, 0, name, {})
             if name == 'collect_page' and set(arguments) == {'url'} and isinstance(arguments['url'], str):
@@ -545,12 +598,20 @@ class Investigation:
 
     def pipeline(self):
         selected = self.options['tools']
+        def search(query):
+            providers = [p for p in self.options['providers'] if p not in self.failed_providers]
+            providers.sort(key=lambda p: p != self.active_provider)
+            for provider in providers:
+                result = self.web_search(query, provider)
+                if not result.get('error'):
+                    return result
+            return {'error': 'Selected search providers unavailable.', 'results': []}
         if 'web_search' in selected:
             query = self.options['query'] + (' ' + self.options['context'] if self.options['context'] else '')
-            self.web_search(query)
+            search(query)
             matching = [x for x in self.report['web_results'] if x['relevant']]
             if not matching and self.case['aliases']:
-                self.web_search('"' + self.case['aliases'][0] + '"')
+                search('"' + self.case['aliases'][0] + '"')
                 matching = [x for x in self.report['web_results'] if x['relevant']]
             self.compare_locally()
             automatic_pages = self.options['page_limit']
@@ -561,7 +622,7 @@ class Investigation:
                     break
                 refined = query + ' ' + suffix
                 if len(refined) <= 200:
-                    self.web_search(refined)
+                    search(refined)
                     self.follow_candidates(automatic_pages)
             if not any(x['relevant'] for x in self.report['web_results']):
                 self.skip('Follow web results', 'No complete name/alias match. Add public context or edit the search query.', 'collect_page')
@@ -679,6 +740,42 @@ class Investigation:
                 seen.add(url)
         return result
 
+    @staticmethod
+    def query_key(query):
+        # Word ordering alone does not constitute a new research strategy.
+        return tuple(sorted(words(query)))
+
+    def alternative_query(self, query):
+        query = self.model_query(query)
+        for host in self.report.get('continuation', {}).get('excluded_hosts', []):
+            host = host.removeprefix('www.')
+            if host.rsplit('.', 1)[-1] in {'com', 'org', 'net'}:
+                host = '.'.join(host.split('.')[-2:])
+            exclusion = ' -site:' + host
+            if exclusion.strip() not in query and len(query + exclusion) <= 200:
+                query += exclusion
+        return self.model_query(query)
+
+    def recovery_choices(self, attempted):
+        from .recovery import recovery_queries
+        if 'web_search' not in self.options['tools']:
+            return []
+        providers = [p for p in self.options['providers'] if p not in self.failed_providers]
+        # Try another provider for a stalled query before more refinements on it.
+        providers.sort(key=lambda p: p == self.active_provider)
+        choices = []
+        for entry in recovery_queries(self.case, self.options):
+            try:
+                query = self.alternative_query(entry['query'])
+            except InvalidInput:
+                continue
+            for provider in providers:
+                if (provider, self.query_key(query)) not in attempted:
+                    choices.append({'action': 'web_search', 'arguments': {'query': query, 'provider': provider},
+                                    'reason': 'Change public research strategy or search provider.',
+                                    'strategy': entry['strategy'], 'provider': provider, 'origin': 'engine'})
+        return choices
+
     def continue_pipeline(self):
         from .ai import plan_continuation, private_output
         self.check()
@@ -694,82 +791,97 @@ class Investigation:
             state = self.ai.status()
         if state['state'] != 'ready':
             raise InvalidInput(state.get('error') or 'Local AI is unavailable. Saved evidence is retained.')
-        queries = { ' '.join(s.get('arguments', {}).get('query', '').casefold().split())
-                    for s in self.report['steps'] if s.get('tool') == 'web_search' }
-        rejected, search_failures = 0, 0
-        index = 0
+        self.compare_pages_locally(self.report['pages'])
+        attempted = {(s.get('arguments', {}).get('provider', 'duckduckgo'), self.query_key(s.get('arguments', {}).get('query', '')))
+                     for s in self.report['steps'] if s.get('tool') == 'web_search'}
+        stage, stalled, index = 'plan', 0, 0
         while True:
-            index += 1
             self.check()
             if self.page_count() >= self.options['page_limit']:
                 self.report['continuation']['stop_reason'] = 'Cumulative useful-page goal reached.'
                 break
+            if self.used >= self.options['max_requests']:
+                self.check(1)
             available = self.continuation_pages()
-            self.publish(f'Local AI continuation decision {index} (up to 60 seconds)')
-            decision = plan_continuation(self.ai, self.case, self.report, available, sorted(queries),
-                                         self.report['continuation']['excluded_hosts'])
-            self.check()
-            decision = private_output(decision, outbound_private_clues(self.case, self.options))
-            decision['reason'] = private_output(decision['reason'], self.case['identifiers'])
-            decision.update(status='planned')
+            choices = self.recovery_choices(attempted)
+            if not available and not choices:
+                self.report['continuation']['stop_reason'] = 'Eligible public pages and fresh strategies on available selected providers exhausted. Retry an unavailable provider or add public context; identity remains unconfirmed.'
+                break
+            index += 1
+            self.report['active_provider'] = self.active_provider
+            self.report['continuation'].update(strategy=stage, unavailable_providers=sorted(self.failed_providers))
+            # Collect eligible results promptly. Repeated model output cannot spend
+            # the remaining deadline preventing real collection requests.
+            if available or stalled >= 2:
+                decision = ({'action': 'collect_page', 'arguments': {'url': available[0]['url']},
+                             'reason': 'Read an eligible untried public source before more searching.',
+                             'origin': 'engine', 'strategy': stage} if available else copy.deepcopy(choices[0]))
+            else:
+                self.publish(f'Local AI {stage} decision {index} (up to 60 seconds)')
+                try:
+                    decision = plan_continuation(self.ai, self.case, self.report, available,
+                        [s.get('arguments', {}).get('query', '') for s in self.report['steps'] if s.get('tool') == 'web_search'][-30:],
+                        self.report['continuation']['excluded_hosts'], stage=stage,
+                        recovery_choices=[choice['arguments']['query'] for choice in choices[:15]])
+                except InvalidInput:
+                    decision = {'action': 'finish', 'arguments': {},
+                                'reason': 'Local AI returned an unusable plan; choose fresh public work automatically.'}
+                self.check()
+                decision = private_output(decision, outbound_private_clues(self.case, self.options))
+                decision['reason'] = private_output(decision['reason'], self.case['identifiers'])
+                decision.update(origin='ai', strategy=stage)
+            decision['status'] = 'planned'
             self.report['continuation']['decisions'].append(decision)
-            self.publish(persist=True)
-            action, args = decision['action'], decision['arguments']
-            if action == 'finish':
-                if not available:
-                    decision['status'] = 'finished'
-                    self.report['continuation']['stop_reason'] = 'Local AI found no further eligible public recovery step. Identity remains unconfirmed without corroboration.'
-                    break
-                # A model stopping early cannot conceal available public work.
-                action, args = 'collect_page', {'url': available[0]['url']}
-                decision.update(action=action, arguments=args,
-                    reason='Eligible untried public source remains; collect it before declaring exhaustion.')
             try:
+                action, args = decision['action'], decision['arguments']
                 if action == 'web_search':
                     if 'web_search' not in self.options['tools']:
                         raise InvalidInput('Web search is not selected.')
-                    query = self.model_query(args['query'])
-                    # Ask the search provider for alternatives, rather than
-                    # returning the same inaccessible profiles on every query.
-                    for host in self.report['continuation']['excluded_hosts']:
-                        host = host.removeprefix('www.')
-                        if host.rsplit('.', 1)[-1] in {'com', 'org', 'net'}:
-                            host = '.'.join(host.split('.')[-2:])
-                        exclusion = ' -site:' + host
-                        if exclusion.strip() not in query and len(query + exclusion) <= 200:
-                            query += exclusion
-                    query = self.model_query(query)
-                    decision['arguments']['query'] = query
-                    normalized = ' '.join(query.casefold().split())
-                    if normalized in queries:
-                        raise InvalidInput('This public query was already attempted; choose a different search.')
-                    queries.add(normalized)
+                    query = self.alternative_query(args['query'])
+                    provider = args.get('provider', self.active_provider)
+                    if provider not in self.options['providers'] or provider in self.failed_providers:
+                        raise InvalidInput('Choose an available selected search provider.')
+                    if (provider, self.query_key(query)) in attempted:
+                        raise InvalidInput('This provider already attempted the public query; change strategy or provider.')
+                    args.update(query=query, provider=provider)
+                    decision['provider'] = provider
                 elif action == 'collect_page':
                     if args['url'] not in {lead['url'] for lead in available}:
                         raise InvalidInput('Choose an untried eligible public URL, outside blocked hosts.')
                 else:
-                    raise InvalidInput('Unsupported continuation action.')
-                before = len(self.report['steps'])
-                result = self.dispatch(action, args)
-                decision['status'] = 'success' if result and not result.get('error') else 'failed'
-                if action == 'web_search':
-                    succeeded = any(s.get('tool') == 'web_search' and s.get('ok') for s in self.report['steps'][before:])
-                    search_failures = 0 if succeeded else search_failures + 1
-                    if succeeded:
-                        self.compare_locally()
-                rejected = 0
-                if search_failures >= 2:
-                    self.report['continuation']['stop_reason'] = 'Public search is unavailable after two attempts. Provider recovery is required; saved evidence is retained.'
-                    break
-            except InvalidInput as exc:
+                    raise InvalidInput('Eligible public work remains; premature finish cannot end recovery.')
+            except (InvalidInput, KeyError) as exc:
                 decision.update(status='blocked', error=private_output(str(exc), self.case['identifiers']))
-                rejected += 1
-                if rejected >= 2:
-                    self.report['continuation']['stop_reason'] = 'Local AI repeated an ineligible recovery plan. Edit public context or retry an individual tool.'
-                    break
+                stalled += 1
+                stage = 'repetition'
+                decision = copy.deepcopy(choices[0]) if choices else {
+                    'action': 'collect_page', 'arguments': {'url': available[0]['url']},
+                    'reason': 'Model repeated or rejected work; recover an eligible public page.', 'origin': 'engine'}
+                decision.update(status='planned', strategy='repetition')
+                self.report['continuation']['decisions'].append(decision)
+                action, args = decision['action'], decision['arguments']
+            self.publish(persist=True)
+            if action == 'web_search':
+                attempted.add((args['provider'], self.query_key(args['query'])))
+            before_pages = self.page_count()
+            result = self.dispatch(action, args, origin=decision.get('origin', 'ai'))
+            decision['status'] = 'success' if result and not result.get('error') else 'failed'
+            if action == 'web_search':
+                if result.get('error'):
+                    stage = 'provider_failure'
+                else:
+                    # Reassessing already attempted/login-only leads wastes the
+                    # deadline without creating a possible collection action.
+                    if self.continuation_pages():
+                        self.compare_locally()
+                    stage = 'no_useful_pages' if not self.continuation_pages() else 'identity_ambiguity'
+            else:
+                stage = 'plan' if self.page_count() > before_pages else 'no_useful_pages'
+                if self.page_count() > before_pages:
+                    stalled = 0
+            self.report['continuation'].update(strategy=stage, unavailable_providers=sorted(self.failed_providers))
             self.publish(persist=True)
         self.publish('Recovery collection finished; reading saved evidence locally', persist=True)
-        # Drafting must not reopen blocked sources or repeat completed searches.
         self.report['network_enabled'] = False
         try:
             self.analyze()
@@ -780,10 +892,10 @@ class Investigation:
         if not isinstance(args, dict):
             raise InvalidInput('Tool inputs must be an object.')
         self.origin = 'user'
-        if name == 'web_search' and set(args) == {'query'}:
+        if name == 'web_search' and set(args) in ({'query'}, {'query', 'provider'}):
             query = field(args['query'], 'Public search query', 200)
             self.options.update(query=query, context='')
-            return self.web_search(query)
+            return self.web_search(query, args.get('provider'))
         if name == 'search_subject' and set(args) == {'query', 'provider'} and args['provider'] in {'wikipedia', 'wikidata'}:
             return self.search_subject(field(args['query'], 'Public search query', 200), args['provider'])
         if name == 'news_search' and set(args) == {'query'}:

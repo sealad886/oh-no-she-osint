@@ -88,24 +88,36 @@ class ContinuationTests(unittest.TestCase):
             runner.options['tools'] = selected
             self.assertEqual([lead['url'] for lead in runner.continuation_pages()], expected)
 
-    def test_repeated_private_or_duplicate_plan_stops_without_outbound_requests(self):
+    def test_private_or_duplicate_plan_recovers_with_fresh_public_work(self):
         for query in ['"Ada Lovelace" private@example.net', '"Ada Lovelace" profile']:
             with self.subTest(query=query):
                 previous = self.previous()
+                previous['options']['max_requests'] = 2
                 previous['steps'].append({'tool': 'web_search', 'arguments': {'query': '"Ada Lovelace" profile -site:example.net'}, 'status': 'success'})
                 runner = self.runner(previous)
                 decision = {'action': 'web_search', 'arguments': {'query': query}, 'reason': 'Try another query.'}
-                with patch('local_osint.ai.plan_continuation', side_effect=lambda *args: copy.deepcopy(decision)), patch('local_osint.collector.fetch_public') as fetcher, self.draft(runner):
+                outbound = []
+                def search(engine, case_id, public_query, enabled, provider='duckduckgo'):
+                    outbound.append((provider, public_query))
+                    saved = engine.ingest(case_id, public_query.encode(), 'Public search')
+                    return {**saved, 'results': []}
+                with patch('local_osint.ai.plan_continuation', side_effect=lambda *args, **kwargs: copy.deepcopy(decision)), patch('local_osint.collector.web_search', side_effect=search), patch.object(runner, 'compare_locally'), self.draft(runner):
                     report = runner.run()
-                fetcher.assert_not_called()
-                self.assertEqual(report['status'], 'partial')
-                self.assertIn('ineligible', report['stop_reason'])
+                self.assertEqual(report['status'], 'limited')
+                self.assertEqual(report['request_units'], 2)
+                self.assertEqual(len(outbound), 2)
+                pairs = {(provider, tuple(sorted(public_query.lower().split()))) for provider, public_query in outbound}
+                self.assertEqual(len(pairs), 2)
+                self.assertTrue(all('private@example.net' not in public_query for _, public_query in outbound))
+                self.assertTrue(any(d['origin'] == 'engine' for d in report['continuation']['decisions']))
+                self.assertTrue(set(previous['source_ids']) <= set(report['source_ids']))
                 self.assertNotIn('private@example.net', json.dumps(report['continuation']))
 
     def test_explicit_public_context_is_not_redacted_before_dispatch(self):
         self.case = self.engine.create_case('Ada Lovelace', 'person', identifiers=['Example Foundation'])
         previous = self.previous()
         previous['options']['context'] = 'Example Foundation'
+        previous['options']['max_requests'] = 1
         runner = self.runner(previous)
         plans = [{'action': 'web_search', 'arguments': {'query': '"Ada Lovelace" Example Foundation'}, 'reason': 'Public employer context.'},
                  {'action': 'finish', 'arguments': {}, 'reason': 'No remaining source.'}]
@@ -115,6 +127,8 @@ class ContinuationTests(unittest.TestCase):
         search.assert_called_once()
         self.assertTrue(search.call_args.args[2].startswith('"Ada Lovelace" Example Foundation'))
         self.assertEqual(report['continuation']['decisions'][0]['status'], 'success')
+        self.assertEqual(report['status'], 'limited')
+        self.assertEqual(report['request_units'], 1)
 
     def test_cancelled_and_time_limited_continuations_keep_previous_evidence(self):
         for cancelled in [True, False]:

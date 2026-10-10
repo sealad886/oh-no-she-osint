@@ -1,6 +1,8 @@
 'use strict';
 const $ = id => document.getElementById(id);
 let currentCase = '', currentSubject = '', optionsCase = '', status = {}, requestVersion = 0, aiReady = false;
+let promptDefaults = {}, searchProviders = [];
+const promptLabels = {plan: 'Plan the next useful action', repetition: 'Recover from repeated or stalled actions', provider_failure: 'Recover from search-provider failure', no_useful_pages: 'Recover when pages are not useful', identity_ambiguity: 'Handle uncertain identity matches', draft: 'Write the final sourced draft'};
 
 function node(tag, text, className) {
   const element = document.createElement(tag);
@@ -20,6 +22,43 @@ async function api(path, data) {
   if (!response.ok) throw new Error(result.error || 'Request failed.');
   return result;
 }
+const pageLeaseId = crypto.randomUUID();
+let pageLeaseTimer, pageLeaseEnabled = false, pageLeaseOpened = false, pageLeaving = false;
+async function openPageLease() {
+  if (!pageLeaseEnabled || pageLeaving) return;
+  try {
+    await api('/api/page/open', {id: pageLeaseId});
+    if (pageLeaving) { closePageLease(); return; }
+    pageLeaseOpened = true;
+    clearInterval(pageLeaseTimer);
+    pageLeaseTimer = setInterval(heartbeatPageLease, 15000);
+  } catch (_) { /* Lifecycle errors must not interrupt case work. */ }
+}
+async function heartbeatPageLease() {
+  if (!pageLeaseEnabled || pageLeaving) return;
+  if (!pageLeaseOpened) { await openPageLease(); return; }
+  try {
+    const lease = await api('/api/page/heartbeat', {id: pageLeaseId});
+    if (!lease.registered && !pageLeaving) { pageLeaseOpened = false; await openPageLease(); }
+  }
+  catch (_) { /* A stopped local runtime needs no user-facing alert. */ }
+}
+function closePageLease() {
+  pageLeaving = true;
+  pageLeaseOpened = false;
+  clearInterval(pageLeaseTimer);
+  if (!pageLeaseEnabled) return;
+  fetch('/api/page/close', {
+    method: 'POST', credentials: 'same-origin', keepalive: true,
+    headers: {'X-OSINT-Local': '1', 'Content-Type': 'application/json'},
+    body: JSON.stringify({id: pageLeaseId})
+  }).catch(() => {});
+}
+window.addEventListener('pagehide', closePageLease);
+window.addEventListener('pageshow', event => {
+  if (event.persisted && pageLeaseEnabled) { pageLeaving = false; openPageLease(); }
+});
+document.addEventListener('visibilitychange', heartbeatPageLease);
 function action(element, callback, event = 'click') {
   element.addEventListener(event, async e => {
     e.preventDefault();
@@ -167,10 +206,13 @@ for (const [index, id] of ['indicators-tab', 'sources-tab'].entries()) $(id).add
     history.replaceState(null, '', location.pathname);
     if (token) await api('/api/session', {token});
     status = await api('/api/status');
+    pageLeaseEnabled = true;
+    await openPageLease();
     $('mode').textContent = status.network ? 'LOCAL PROCESSING' : 'OFFLINE MODE';
     $('create-investigation').textContent = status.network ? 'Start investigation ↗' : 'Create offline case';
     $('start-notice').hidden = !status.network;
     $('run-investigation').disabled = !status.network;
+    await loadPromptSettings();
     await refreshAI();
     $('workspace').hidden = false;
     await loadCases();
@@ -178,6 +220,31 @@ for (const [index, id] of ['indicators-tab', 'sources-tab'].entries()) $(id).add
 })();
 
 let displayedRun = null, runTimer, aiTimer;
+async function loadPromptSettings() {
+  const settings = await api('/api/prompts');
+  promptDefaults = settings.defaults;
+  searchProviders = settings.providers;
+  const providers = $('search-providers'); providers.replaceChildren();
+  for (const provider of searchProviders) {
+    const label = node('label'), input = node('input'); input.type = 'checkbox'; input.name = 'search-provider'; input.value = provider.id; input.checked = true;
+    label.append(input, document.createTextNode(provider.label)); providers.append(label);
+  }
+  const prompts = $('prompt-settings'); prompts.replaceChildren();
+  for (const [key, label] of Object.entries(promptLabels)) {
+    const text = node('label', label); text.htmlFor = 'prompt-' + key;
+    const input = node('textarea'); input.id = 'prompt-' + key; input.dataset.promptKey = key; input.maxLength = 4000; input.rows = 4; input.value = promptDefaults[key] || '';
+    prompts.append(text, input);
+  }
+}
+function setRecoveryOptions(options = {}) {
+  const providers = options.providers || searchProviders.map(provider => provider.id);
+  for (const input of document.querySelectorAll('[name="search-provider"]')) input.checked = providers.includes(input.value);
+  const prompts = {...promptDefaults, ...(options.prompts || {})};
+  for (const [key] of Object.entries(promptLabels)) $('prompt-' + key).value = prompts[key] || '';
+}
+function providerLabel(value) {
+  return searchProviders.find(provider => provider.id === value)?.label || ({wikipedia: 'Wikipedia (English)', wikidata: 'Wikidata'})[value] || value;
+}
 function setOptions(options = {}) {
   $('investigation-query').value = options.query || ('"' + currentSubject + '"');
   $('investigation-context').value = options.context || '';
@@ -185,13 +252,21 @@ function setOptions(options = {}) {
   $('page-limit').value = options.page_limit || 4;
   const tools = options.tools || ['web_search', 'wikipedia', 'wikidata', 'news', 'domain'];
   for (const input of document.querySelectorAll('[name="investigation-tool"]')) input.checked = tools.includes(input.value);
+  setRecoveryOptions(options);
 }
 function getOptions() {
   const tools = [...document.querySelectorAll('[name="investigation-tool"]:checked')].map(input => input.value);
   if (!tools.length) throw new Error('Select at least one investigation tool.');
   for (const id of ['request-limit', 'page-limit']) if (!$(id).reportValidity()) throw new Error('Check the investigation limits.');
   if (['request-limit', 'page-limit'].some(id => !Number.isSafeInteger(Number($(id).value)))) throw new Error('Use whole numbers within the browser’s exact integer range for investigation limits.');
-  return {query: $('investigation-query').value.trim(), context: $('investigation-context').value.trim(), tools, max_requests: Number($('request-limit').value), page_limit: Number($('page-limit').value)};
+  const providers = [...document.querySelectorAll('[name="search-provider"]:checked')].map(input => input.value);
+  if (!providers.length) throw new Error('Select at least one public search provider.');
+  const prompts = {};
+  for (const [key] of Object.entries(promptLabels)) {
+    if ($('prompt-' + key).value.length > 4000) throw new Error('Each AI prompt must be at most 4,000 characters.');
+    prompts[key] = $('prompt-' + key).value;
+  }
+  return {query: $('investigation-query').value.trim(), context: $('investigation-context').value.trim(), tools, providers, prompts, max_requests: Number($('request-limit').value), page_limit: Number($('page-limit').value)};
 }
 function updateRunControls() {
   const busy = displayedRun?.status === 'running';
@@ -200,6 +275,7 @@ function updateRunControls() {
   $('continue-investigation').disabled = busy || !status.network || !currentCase;
   $('stop-investigation').hidden = !busy;
   $('investigation-options').disabled = busy || !status.network;
+  $('recovery-options').disabled = busy;
   $('new-tool').disabled = busy || !currentCase;
   $('retry-ai').disabled = busy || !currentCase || !aiReady;
   for (const button of document.querySelectorAll('[data-tool-action]')) button.disabled = busy || !currentCase || (!status.network && button.dataset.toolAction !== 'read_evidence') || (button.dataset.toolAction === 'analyze' && !aiReady);
@@ -225,7 +301,7 @@ function argumentList(args) {
   const list = node('dl', undefined, 'tool-arguments');
   for (const [key, value] of Object.entries(args || {})) {
     if (value === undefined || value === null || value === '') continue;
-    list.append(node('dt', argumentLabels[key] || key), node('dd', Array.isArray(value) ? value.join(', ') : typeof value === 'object' ? JSON.stringify(value) : String(value)));
+    list.append(node('dt', argumentLabels[key] || key), node('dd', key === 'provider' && typeof value === 'string' ? providerLabel(value) : Array.isArray(value) ? value.join(', ') : typeof value === 'object' ? JSON.stringify(value) : String(value)));
   }
   return list;
 }
@@ -284,6 +360,7 @@ function renderContinuation(report) {
   area.replaceChildren(); area.hidden = !continuation;
   if (!continuation) return;
   area.append(node('h3', 'Local AI continuation plan'), node('p', 'Saved evidence and useful pages carry forward. This continuation has a fresh collection ceiling and time limit. Planner choices are unverified; actual tool outcomes appear in activity below.', 'small muted'));
+  if (continuation.strategy) area.append(node('p', 'Current recovery strategy: ' + (promptLabels[continuation.strategy] || continuation.strategy), 'small'));
   if (continuation.excluded_hosts?.length) area.append(node('p', 'Hosts excluded from follow-up: ' + continuation.excluded_hosts.join(', '), 'small'));
   if (continuation.stop_reason) area.append(node('p', continuation.stop_reason, 'small'));
   const decisions = continuation.decisions || [];
@@ -294,6 +371,8 @@ function renderContinuation(report) {
     heading.append(node('h4', toolLabels[decision.action] || decision.action || 'Planner decision'), node('span', decision.status || 'Planned', 'step-status'));
     card.append(heading);
     if (decision.reason) card.append(node('p', decision.reason, 'small'));
+    if (decision.strategy) card.append(node('p', 'Strategy: ' + (promptLabels[decision.strategy] || decision.strategy), 'small muted'));
+    if (decision.provider && decision.arguments?.provider !== decision.provider) card.append(node('p', 'Provider: ' + providerLabel(decision.provider), 'small'));
     if (decision.error) card.append(node('p', decision.error, 'step-error'));
     if (Object.keys(decision.arguments || {}).length) card.append(argumentList(decision.arguments));
     area.append(card);
@@ -467,6 +546,12 @@ function renderToolFields(tool, args = {}) {
       const select = node('select'); select.id = 'tool-provider';
       for (const provider of ['wikipedia', 'wikidata']) { const option = node('option', provider === 'wikipedia' ? 'Wikipedia (English)' : 'Wikidata'); option.value = provider; select.append(option); }
       select.value = args.provider || 'wikipedia'; area.append(label, select);
+    } else if (tool === 'web_search') {
+      const label = node('label', 'Public web search provider'); label.htmlFor = 'tool-web-provider';
+      const select = node('select'); select.id = 'tool-web-provider';
+      for (const provider of searchProviders) { const option = node('option', provider.label); option.value = provider.id; select.append(option); }
+      select.value = args.provider || [...document.querySelectorAll('[name="search-provider"]:checked')][0]?.value || searchProviders[0]?.id;
+      area.append(label, select);
     }
   } else if (tool === 'collect_page') {
     toolField(area, 'Public HTTPS URL', 'tool-url', args.url || '', {type: 'url', maxLength: 2000, required: true, placeholder: 'https://example.org/page'});
@@ -500,7 +585,7 @@ function openTool(caseId, tool = 'web_search', args = {}) {
   ($('tool-fields').querySelector('input, select') || $('tool-kind')).focus();
 }
 function toolArguments(tool) {
-  if (['web_search', 'search_subject', 'news_search'].includes(tool)) return {query: $('tool-query').value.trim(), ...(tool === 'search_subject' ? {provider: $('tool-provider').value} : {})};
+  if (['web_search', 'search_subject', 'news_search'].includes(tool)) return {query: $('tool-query').value.trim(), ...(tool === 'search_subject' ? {provider: $('tool-provider').value} : tool === 'web_search' ? {provider: $('tool-web-provider').value} : {})};
   if (tool === 'collect_page') return {url: $('tool-url').value.trim()};
   if (tool === 'domain_signals') {
     const signals = [...document.querySelectorAll('[data-tool-signal]:checked')].map(input => input.value);
@@ -511,6 +596,7 @@ function toolArguments(tool) {
   return {};
 }
 action($('new-tool'), () => openTool(currentCase));
+action($('reset-prompts'), () => { setRecoveryOptions(); notice('Recovery defaults restored in this form. They apply to the next run or continuation.'); });
 action($('retry-ai'), () => openTool(currentCase, 'analyze'));
 action($('close-tool'), () => $('tool-dialog').close());
 action($('tool-kind'), () => renderToolFields($('tool-kind').value), 'change');

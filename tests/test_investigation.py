@@ -415,7 +415,8 @@ class InvestigationTests(unittest.TestCase):
             runner.analyze()
         self.assertEqual(runner.report['ai']['status'], 'failed')
         self.assertEqual(runner.report['ai']['tool_calls'][0]['tool'], 'web_search')
-        self.assertEqual(runner.report['ai']['tool_calls'][0]['arguments'], {'query': 'Ada Lovelace'})
+        self.assertEqual(runner.report['ai']['tool_calls'][0]['arguments']['query'], 'Ada Lovelace')
+        self.assertEqual(runner.report['ai']['tool_calls'][0]['arguments']['provider'], 'duckduckgo')
         self.assertTrue(runner.report['ai']['tool_calls'][0]['ok'])
 
     def test_unavailable_pages_do_not_consume_successful_page_goal(self):
