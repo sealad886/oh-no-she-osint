@@ -277,3 +277,26 @@ Retrospective: readable content and candidate identity are separate facts. Priva
 context can guide local comparison without yielding corroboration. The engine must
 show that uncertainty, preserve barriers and continue eligible public work; neither
 an academic namesake biography nor a model draft proves the requested person's identity.
+
+## User-selected investigation limits — 2026-10-10
+
+Accepted bounded change: remove the fixed 64-request and eight-useful-page product
+caps from both UI and backend. Defaults remain 24 and four; each run retains its
+user-selected finite ceiling/goal, existing 300-second soft deadline, cancellation
+and bounded eligible search work. Values must be positive whole numbers no greater
+than 2^53−1 so browser JSON preserves them exactly. This is a numeric representation
+boundary. Larger goals do not guarantee source availability or solve provider
+blocking or identity uncertainty.
+
+Route: small-feature-change, small scale, low risk, change authority. Canonical
+option validation, numeric inputs and run budget are established owners; no schema,
+data conversion, dependency or architecture change is needed. Context/acceptance
+and design gates follow the explicit request and inspected implementation.
+Documentation activates for configuration guidance; bounded independent review
+activates under the existing review workflow. Separate planning, security,
+coordination and release execution branches are not needed for this slice;
+existing resource/privacy controls remain in force. Local commit authority persists
+from the invoked commit skill. Implementation, behavioral/browser verification,
+independent review and documentation receipt are complete. Local commit is the
+remaining handoff action.
+External publication unauthorized.

@@ -352,7 +352,7 @@ class InvestigationTests(unittest.TestCase):
         self.assertEqual(len(runner.report['web_results']), 1)
 
     def test_configurable_limits_and_offline_local_reads(self):
-        for options in [{'max_requests': 0}, {'max_requests': True}, {'page_limit': 9}, {'tools': ['shell']}, {'context': 'x' * 200, 'query': 'x' * 200}]:
+        for options in [{'max_requests': 0}, {'max_requests': True}, {'page_limit': 0}, {'page_limit': 1.5}, {'page_limit': 2 ** 53}, {'max_requests': 2 ** 53}, {'tools': ['shell']}, {'context': 'x' * 200, 'query': 'x' * 200}]:
             with self.subTest(options=options), self.assertRaises(InvalidInput):
                 Investigation(self.engine, self.case['id'], True, options=options)
         runner = Investigation(self.engine, self.case['id'], True, options={'max_requests': 1, 'tools': ['web_search']})
@@ -369,6 +369,30 @@ class InvestigationTests(unittest.TestCase):
             with self.assertRaises(InvalidInput):
                 local.dispatch('web_search', {'query': '"Ada Lovelace"'})
             fetch.assert_not_called()
+
+    def test_larger_user_limits_allow_more_than_64_units_and_eight_useful_pages(self):
+        """User limits control actual work, rather than only accepting large values."""
+        runner = Investigation(self.engine, self.case['id'], True,
+                              options={'tools': ['web_search'], 'max_requests': 100, 'page_limit': 70})
+        searches = []
+        def search(engine, case_id, query, enabled):
+            offset = len(searches) * 10
+            searches.append(query)
+            saved = engine.ingest(case_id, query.encode(), 'Public search', 'search:' + query)
+            return {**saved, 'results': [{'title': 'Ada Lovelace public profile', 'snippet': 'Detailed public biography',
+                'url': f'https://example.org/profile/{n}'} for n in range(offset, offset + 10)]}
+        def collect(engine, case_id, url, enabled, allow_query=False):
+            body = '<p>Ada Lovelace wrote detailed notes about analytical engines and mathematical applications.</p>'
+            if url.rsplit('/', 1)[-1].isdigit():
+                body += f'<a href="{url}/about">About Ada Lovelace</a><a href="{url}/team">Team Ada Lovelace</a>'
+            return engine.ingest(case_id, body.encode(), 'Public page', url, 'html')
+        with patch('local_osint.collector.web_search', side_effect=search), patch('local_osint.collector.collect', side_effect=collect):
+            report = runner.run()
+        self.assertEqual(report['status'], 'complete')
+        self.assertEqual(report['quality_count'], 70)
+        self.assertEqual(report['budget'], {'used': 73, 'limit': 100})
+        self.assertEqual(len(report['pages']), 70)
+        self.assertEqual(len(searches), 3)
 
     def test_ai_request_failure_can_be_retried_without_losing_prior_tool_activity(self):
         from unittest.mock import Mock

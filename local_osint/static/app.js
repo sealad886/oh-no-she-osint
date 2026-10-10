@@ -190,6 +190,7 @@ function getOptions() {
   const tools = [...document.querySelectorAll('[name="investigation-tool"]:checked')].map(input => input.value);
   if (!tools.length) throw new Error('Select at least one investigation tool.');
   for (const id of ['request-limit', 'page-limit']) if (!$(id).reportValidity()) throw new Error('Check the investigation limits.');
+  if (['request-limit', 'page-limit'].some(id => !Number.isSafeInteger(Number($(id).value)))) throw new Error('Use whole numbers within the browser’s exact integer range for investigation limits.');
   return {query: $('investigation-query').value.trim(), context: $('investigation-context').value.trim(), tools, max_requests: Number($('request-limit').value), page_limit: Number($('page-limit').value)};
 }
 function updateRunControls() {

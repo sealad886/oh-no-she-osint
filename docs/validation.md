@@ -385,3 +385,34 @@ case header. The app and owned model remain running for the user. Provider block
 unrendered JavaScript pages, heuristic quality decisions, namesake ambiguity and
 model paraphrases/inferences remain bounded limitations. Original saved case fields
 and user-requested case exports intentionally retain their private data.
+
+## User-selected limits — 2026-10-10
+
+Removed the fixed 64-request and eight-useful-page caps from UI and backend.
+Defaults remain 24 and four; settings accept positive exact browser integers
+through 2^53−1. The run's selected ceiling/goal, 300-second soft deadline, Stop,
+bounded search refinements and source eligibility remain independently effective.
+No schema, case migration, package/model download or provider request was needed
+for this correction.
+
+The complete suite passed **129 tests in 6.628 seconds**, outside the sandbox for
+loopback fixtures. A synthetic public-provider regression actually collected
+70 useful pages in 73 units under a 100-unit ceiling, proving larger settings
+affect work rather than only validation. Invalid zero, boolean, fractional and
+unsafe values remain rejected; existing one-unit exhaustion and offline behavior
+still pass. Compilation, JavaScript syntax and diff checks passed.
+
+Independent bounded review returned no material in-scope P0/P1/P2 finding against
+stable snapshot
+`76a0256f6c522a977530bb9126ae6d8065ae41aaf02856a25e3a873666fca445`.
+It passed 24 investigation tests and separately exercised backend and actual
+frontend validation code at larger and numeric-boundary values. Final receipt
+documentation was appended afterward; source/tests remained unchanged.
+
+Browser verification in the refreshed canonical app accepted 100 requests and
+70 useful pages. Attempting a value above the exact integer range displayed its
+validation error before starting collection. The app and optional local model
+were restored to ready state. No further Eric provider run was launched: blocked
+sites and uncorroborated identity require different public leads/context, and
+larger numeric settings alone cannot establish identity or guarantee coverage.
+The refreshed UI proof excludes the private case header.

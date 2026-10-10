@@ -75,20 +75,25 @@ To disable external collection, including DNS:
    evidence. Export a readable Markdown dossier or complete JSON export with originals,
    fingerprints, timestamps, subject metadata, run history and source references.
 
-The default **request ceiling is 24**, configurable from 1 to 64. It is a limit,
+The default **request ceiling is 24**; choose any positive whole number within the
+browser's exact integer range (up to 9,007,199,254,740,991). There is no fixed
+product cap of 64. It is a limit,
 not a target: a run can finish at 9 requests when its selected work and relevant
 follow-ups are done. The status explains whether work finished, a limit was reached,
 you stopped it, or tools were unavailable. Units count collection operations;
 registration reserves two, and a permitted redirect can add HTTP requests within
 one operation. Reading saved evidence and local model requests use no outbound units.
 
-The page goal defaults to **4 useful relevant pages**, configurable from 1 to 8.
+The page goal defaults to **4 useful relevant pages**; it uses the same positive
+whole-number range, with no fixed product cap of 8.
 A successful HTTP response can still be a login screen, empty JavaScript shell or
 unrelated page. Those originals are saved and labelled, but do not fill the goal.
 Failed or non-useful pages still consume request units; the engine tries later
 relevant results. Useful counts refer to the current run; earlier pages stay visible.
-With AI enabled, automatic collection reserves
-a page slot for model follow-up. There is a 300-second soft run deadline and one run
+With AI enabled, automatic collection tries to fill the useful goal before drafting.
+Larger settings permit more work but do not guarantee more available sources;
+eligible public leads and bounded search refinements can still be exhausted.
+There is a 300-second soft run deadline and one run
 at a time. Requests in flight finish before cancellation;
 OS DNS follows the OS timeout policy. Restart marks unfinished runs **interrupted**
 and keeps collected evidence; it never automatically resumes outbound collection.

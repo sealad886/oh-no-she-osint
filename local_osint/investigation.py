@@ -24,6 +24,7 @@ QUALIFIERS = {'P580': 'Start time', 'P582': 'End time', 'P585': 'Point in time',
               'P518': 'Applies to part', 'P407': 'Language', 'P459': 'Method',
               'P1480': 'Sourcing circumstances', 'P7452': 'Reason for preferred rank'}
 SOURCES = {'web_search', 'wikipedia', 'wikidata', 'news', 'domain'}
+MAX_SAFE_INTEGER = 2 ** 53 - 1  # Preserve exact values in the browser's JSON numbers.
 
 
 def options_for(case, values=None):
@@ -36,9 +37,9 @@ def options_for(case, values=None):
               'max_requests': values.get('max_requests', 24), 'page_limit': values.get('page_limit', 4)}
     if not isinstance(result['tools'], list) or not result['tools'] or any(not isinstance(t, str) or t not in SOURCES for t in result['tools']) or len(set(result['tools'])) != len(result['tools']):
         raise InvalidInput('Select at least one supported source, without duplicates.')
-    for name, maximum in [('max_requests', 64), ('page_limit', 8)]:
-        if type(result[name]) is not int or not 1 <= result[name] <= maximum:
-            raise InvalidInput(f'{name} must be a whole number from 1 to {maximum}.')
+    for name in ['max_requests', 'page_limit']:
+        if type(result[name]) is not int or not 1 <= result[name] <= MAX_SAFE_INTEGER:
+            raise InvalidInput(f'{name} must be a positive whole number within the browser\'s exact integer range.')
     field(result['query'] + (' ' + result['context'] if result['context'] else ''), 'Combined public query and context', 200)
     return result
 

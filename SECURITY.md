@@ -46,9 +46,12 @@ assess evidence before attributing it to a person or organization.
 
 ## Automatic collection and model boundary
 
-Runs reserve one worker, a default 24-request-unit ceiling (configurable 1–64),
-a default four-useful-page goal (configurable 1–8), and a 300-second soft
-deadline. A ceiling bounds work; it is not a completion target. Failed collection
+Runs reserve one worker, a default 24-request-unit ceiling and a default
+four-useful-page goal,
+both chosen by the user as positive whole numbers. Fixed product caps are removed;
+values must remain within JavaScript's exact integer range (1 through 2^53−1).
+Runs retain a 300-second soft deadline. A ceiling bounds work; it is not a
+completion target. Failed collection
 attempts consume units but do not fill the useful-page goal. A saved login screen,
 empty JavaScript shell or unrelated page also does not fill the goal. Raw originals
 remain evidence even when they fail the usefulness heuristic. Useful counts refer
