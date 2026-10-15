@@ -134,7 +134,8 @@ class ServerTests(unittest.TestCase):
                 if report['status'] != 'running':
                     break
                 time.sleep(.01)
-            self.assertEqual(report['status'], 'complete')
+            self.assertEqual(report['status'], 'partial')
+            self.assertEqual(report['quality_count'], 0)
             self.assertEqual(report['case_id'], case['id'])
             self.assertEqual(len(report['source_ids']), 3)
         self.assertEqual(self.request('/api/stop', {'case': 'other', 'run_id': report['run_id']})[0], 400)

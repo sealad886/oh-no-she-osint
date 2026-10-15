@@ -1,408 +1,342 @@
 # oh no, she OSINT.
 
-A private OSINT workspace focused on **people, organizations, domains, topics or
-other subjects**. Collect public signals online; store evidence, extract indicators,
-search and write dossiers entirely on your machine. Enter a subject and press **Start investigation**; the app collects evidence for you.
+A private investigation workspace for **people, organizations, domains, topics
+and other subjects**. Search public sources, follow relevant leads, inspect what
+each tool did, and keep original evidence on your machine. A Wikipedia entry is
+not required.
 
-No accounts, API keys, cloud database, analytics, cloud AI service, external fonts or
-third-party Python packages. Open source under the [MIT license](LICENSE).
+Collection goes online. Storage, searching, comparison and optional llama.cpp
+analysis stay local. The core uses Python's standard library and SQLite: no cloud
+AI, cloud database, telemetry, provider accounts or API keys required. The app is
+MIT licensed; optional tools and source definitions have their own
+[licence notices](docs/SOURCE_LICENSES.md).
 
 ## Start
 
-Install Python 3.11 or newer and nginx. On macOS, `brew install nginx` installs
-the binary; do not start a Homebrew nginx service. From this project directory:
+Install Python 3.11+ and nginx. On macOS, `brew install nginx` installs the binary;
+do not start a separate Homebrew nginx service. From this project directory:
 
 ```sh
 ./start.sh
 ```
 
 The launcher creates a project-only virtual environment if needed, starts its own
-foreground nginx on `127.0.0.1` using a free port, and opens a private browser
-launch link. nginx forwards to an ephemeral loopback Python API. Configuration
-and temporary files stay in a private per-launch directory; shared nginx settings,
-services, access logs and caches are not used. Nothing
-goes online until you request a collection. Keep that link private. Stop with **Ctrl+C**;
-your cases remain on disk.
+foreground nginx on a free `127.0.0.1` port and opens a private launch link. nginx
+forwards to an ephemeral loopback Python API. Generated configuration and runtime
+files stay in private app directories. Keep the launch link private.
 
-Closing or leaving the last app tab shuts down the app backend, its owned local
-AI and its owned nginx master and worker, after a two-second grace period that
-allows reloads to reconnect. Other open app tabs keep the runtime alive. If a tab
-crashes without sending its close event, its heartbeat expires after 90 seconds.
-Saved cases remain on disk; run `./start.sh` again to reopen.
+Closing or leaving the last app page checkpoints work and stops app-owned backend,
+nginx, local AI and optional metasearch. Reloads have a two-second grace period;
+other open app pages keep the runtime alive. If a page crashes without its close
+event, the heartbeat expires after 90 seconds. **Ctrl+C** also stops the app.
+Saved cases remain on disk. Reopen with `./start.sh`, select the case, and use
+**Resume pending actions** or **Continue investigation**.
 
-For Windows, or without the launcher:
+```sh
+./start.sh --port 9000                    # request a specific free local port
+./start.sh --data-dir ./private-cases     # choose private local storage
+./start.sh --offline                     # prohibit external collection, including DNS
+./start.sh --direct                      # explicit Python listener without nginx
+./start.sh --model /absolute/path/model.gguf
+```
+
+Without the launcher:
 
 ```sh
 python3 -m venv .venv
 .venv/bin/python -m local_osint serve --nginx --open --allow-network
 ```
 
-On Windows use `.venv\Scripts\python.exe` instead of `.venv/bin/python`.
-Windows support is intended; current validation was performed on macOS.
-`./start.sh --direct` explicitly runs the Python listener without nginx. Both
-modes use the same authenticated API, evidence store and page lifetime cleanup.
-
-To disable external collection, including DNS:
-
-```sh
-./start.sh --offline
-```
+Windows uses `.venv\Scripts\python.exe`. Windows support is intended; native
+validation recorded so far is on macOS. Python 3.11+ is the declared floor; see
+[validation evidence](docs/validation.md) for versions actually run.
 
 ## First investigation
 
-1. Click **Start your first investigation** or **New case**. Choose a person,
-   organization, domain or topic, and enter its name. Aliases and public identifiers
-   are optional; adding a known website can improve relevance.
-2. Press **Start investigation**. The app searches the real public web through
-   the configured public search providers (DuckDuckGo Lite and Bing by default),
-   saves original search responses, and follows relevant public
-   pages. A Wikipedia entry is not required. Selected Wikipedia/Wikidata, recent
-   GDELT news and domain tools add further evidence when available.
-3. For a common name, edit **Web search query** and add **Public context**, such as
-   a public location, employer or topic. The default query quotes the subject's
-   full name. Existing contact details are not appended to searches automatically.
-   They still help: the engine compares known identifiers with collected public
-   material locally, and optional local AI receives private case context for comparison.
-   Select the tools you want, set limits, then click **Run investigation**.
-4. Follow **Tool activity** while the run works. Each call shows its inputs, status,
-   result or error, timing, source evidence and whether the engine, AI or you
-   requested it. **Edit & retry** changes and reruns one tool without rerunning the
-   whole investigation. **Run a tool** starts a separate search, page collection,
-   domain signal or evidence read. Earlier activity and sources stay saved.
-5. Read the dossier and its source references. Leads distinguish local identifier
-   corroboration, public-context matches, name-only matches and unrelated material.
-   Local matching compares known clues with returned public material without sending
-   those clues to search providers. Optional AI context assessment is an unverified
-   local hint. A name match alone does not establish identity, and partial name
-   fragments do not qualify for automatic follow-up.
-   Candidates and AI drafts remain unconfirmed. **Stop** retains sources already
-   saved and stops before the next request.
-   Wikidata claims preserve statement rank, qualifiers, date precision and calendar;
-   deprecated claims are excluded and ended website claims are not followed.
-6. Optionally open **Optional local AI**, click **Start local AI**, wait for Ready and enable
-   **Add AI analysis to next run**. Then run the investigation again. AI reads the
-   sources, searches the public web, follows approved leads and drafts locally.
-   **Analyze collected evidence** can retry AI independently, including after a
-   failed or incomplete draft.
-   **Continue investigation** uses the saved dossier and tool outcomes to plan
-   further collection. It starts the owned local model automatically if needed;
-   the AI checkbox does not need to be enabled.
-7. Inspect indicators and original sources below the dossier, or import your own
-   evidence. Export a readable Markdown dossier or complete JSON export with originals,
-   fingerprints, timestamps, subject metadata, run history and source references.
+1. Select **New case**, choose the subject type and enter its name. Aliases and
+   private comparison clues are optional. Clues, including known URLs/domains,
+   stay local unless explicitly supplied again in the appropriate public setting.
+2. Press **Start investigation**. Public web search uses DuckDuckGo Lite and Bing
+   by default. Selected Wikipedia, Wikidata, news and domain tools add sources.
+   Originals, failures and partial results stay saved.
+3. Refine **Web search query** and **Public context** for ambiguous names. Use
+   public role, employer, location or topic words you intend providers to see.
+4. Open **Source packs and collection time**. Select suitable sources, approve
+   public usernames or add public starting URLs, then save. These settings also
+   save when you start or continue an investigation.
+5. Watch **Tool activity** and **Research action queue**. Inspect input, purpose,
+   priority, attempts, outcomes and evidence. Retry, skip or prioritize work;
+   **Edit & run** creates a separately inspectable action.
+6. Inspect **Candidate identities and sourced observations**. Candidates remain
+   separate. Observations cite original evidence and an exact passage in a
+   versioned local extraction. A name or username does not prove identity.
+7. Export Markdown or JSON. JSON includes original bytes, hashes, case details,
+   run history and research workspace state. Review private fields before sharing.
 
-The default **request ceiling is 24**; choose any positive whole number within the
-browser's exact integer range (up to 9,007,199,254,740,991). There is no fixed
-product cap of 64. It is a limit,
-not a target: a run can finish at 9 requests when its selected work and relevant
-follow-ups are done. The status explains whether work finished, a limit was reached,
-you stopped it, or tools were unavailable. Units count collection operations;
-registration reserves two, and a permitted redirect can add HTTP requests within
-one operation. Reading saved evidence and local model requests use no outbound units.
+**Stop** retains collected evidence and stops before the next operation. An
+in-flight request/model call may finish first. Reopening a case does not itself
+start outbound collection.
 
-The page goal defaults to **4 useful relevant pages**; it uses the same positive
-whole-number range, with no fixed product cap of 8.
-A successful HTTP response can still be a login screen, empty JavaScript shell or
-unrelated page. Those originals are saved and labelled, but do not fill the goal.
-Failed or non-useful pages still consume request units; the engine tries later
-relevant results. A fresh investigation counts its own useful pages. Continuing
-retains the existing useful-page count and evidence, then works toward your chosen
-goal with a fresh collection ceiling.
-With AI enabled, automatic collection tries to fill the useful goal before drafting.
-Larger settings permit more work but do not guarantee more available sources;
-eligible public leads and bounded search refinements can still be exhausted.
-There is a 300-second soft run deadline and one run
-at a time. Requests in flight finish before cancellation;
-OS DNS follows the OS timeout policy. Restart marks unfinished runs **interrupted**
-and keeps collected evidence; it never automatically resumes outbound collection.
-A partial result is useful evidence, not complete coverage. Search challenges,
-news rate limits and blocked sites appear as tool failures. Inspect the saved search
-response when available, edit the query or retry later. No challenge bypass occurs.
+**Evidence relationships and observation timeline** provides a candidate-filtered
+table linking candidates to observations and supporting or contradicting original
+sources. Its timeline orders when observations were recorded locally, rather than
+claiming those are real-world event dates. This is an accessible provenance view;
+it does not infer social relationships or account ownership. Large views show up
+to 80 entries and retain all references in exports.
 
-Coverage includes indexed public websites, profiles, organization pages, news and
-encyclopedic sources. Ordinary people can have useful web results without appearing
-on Wikipedia. Sparse or ambiguous results may need an alias, public context or known
-public URL; absence of results does not prove absence of a public footprint. No social-account
-enumeration, login-required scraping, people-search brokers, facial recognition,
-identity attribution, vulnerability scanning or unrestricted crawling.
+## Choose and run source tools
+
+Open **Source tools · configure and run**. Each card explains inputs, destinations,
+licence and availability. **Configure & run** submits only the shown inputs and
+saves the action. A single source can run without a full investigation; local
+tools remain available in offline mode.
+
+| Source tool | Input | Result |
+| --- | --- | --- |
+| Website source discovery | Public HTTPS URL | Same-host links, feeds, sitemap references and structured source metadata; eligible leads enter the queue |
+| Crossref publications | Public query | Publication metadata and DOI links; enable for relevant research rather than every person |
+| GitHub public profile | Public username | Public API account metadata; ownership by the target remains unconfirmed |
+| Public username profile | Username and GitHub/GitLab site | Requires matching account metadata; generic HTTP 200 responses, login screens and challenges are insufficient |
+| Wayback public URL lookup | Public URL | Existing archive availability with original URL and capture date |
+| Public place references | Public locality query | GeoNames references; no private-address or automatic Nominatim lookup |
+| Local email header analysis | Saved source selected by title | Local analysis of imported UTF-8 `.eml` or header evidence; no correspondence upload |
+| Owned SearXNG metasearch | Public query | Optional local service with selected external engines, fanout and failure reporting |
+
+Automatic account checks use only **Approved public usernames**. Newly discovered
+handles do not authorize checks on other sites. A manually configured source action
+authorizes its exact input, not wider collection. Public starting URLs remain
+separate from private case clues. Automatic sources and links are revalidated at
+dispatch against network permission, public URL scope and private-clue guards.
+
+**Run a tool** also retains individual web/news/encyclopedia searches, public-page
+collection, domain signals and saved-evidence reads. No extra shell tool server
+or Python package installation is required.
+
+## Progress, recovery and limits
+
+The workspace reports **discovery leads**, **readable documents** and
+**corroborated claims** separately. Snippets create leads. Login walls, empty shells
+and unrelated pages stay saved but do not fill the useful-page goal. Readability
+is separate from attribution and corroboration. Archived copies and syndicated
+material are not independent corroboration of the same original source. AI
+observations default to unconfirmed.
+
+The persistent queue records connector, arguments, purpose, originating evidence
+and candidate where known, priority and attempt history. Outcomes distinguish
+success, valid empty results, blocked access, rate limits, uninterpretable responses
+and errors. Failure is not proof of no public footprint.
+
+Local AI can rank offered actions. Invalid or repeated choices fall back to queue
+order; adaptive web search can change strategy/provider after repetition, poor
+results or provider failure. Saved case clues guide local namesake comparison.
+These assessments remain unverified; originals never change.
+
+**Continue investigation** retains prior sources and useful-page progress, starts
+the cached local model if needed, and plans further permitted work. **Resume
+pending actions** processes the saved queue under current settings. An unfinished
+remote read recovers as **interrupted after dispatch**: it may have reached the
+source before the crash. Resuming can repeat that read, retaining the previous
+attempt. Exactly-once delivery is not promised.
+
+Cooldowns and connector health survive restarts. Inspect the eligible-after time
+before retrying; retry cannot bypass a current rate-limit cooldown. A partial run
+can retain cooling-down work for later resumption.
+
+Defaults: **24 collection units**, **4 useful pages**, **300 seconds**. Request
+ceiling and page goal accept positive exact browser integers through 2^53−1.
+Choose another duration or enable **Keep working while this page is open**
+(`runtime_seconds = 0`, `keep_working = true`). This removes the soft elapsed-time
+deadline while retaining request ceilings, page goals, source exhaustion,
+per-request limits, cooldowns and Stop. It cannot guarantee more evidence.
+
+Units count operations, not packets or exact upstream requests. RDAP reserves
+directory and registry work; redirects can add contacts within an operation. One
+SearXNG action can contact all selected engines. Its separately reported fanout
+is configured engine count, not exact upstream traffic. Local reads and model
+processing use no outbound collection units.
 
 ## Optional local AI
 
-To extend a saved case, click **Continue investigation**. The local planner reviews
-collected evidence, unavailable tools and remaining public leads, then chooses
-search refinements or page follow-ups. Its decisions, inputs, reasons and outcomes
-appear in **Local AI continuation plan** and **Tool activity**. Excluded hosts and
-the final stop reason explain which paths were exhausted or uncertain.
-
-Continuation requires an installed `llama-server` and a cached local model. It can
-start its owned model automatically, but never downloads a model or installs a
-package. If the model is unavailable, the saved case remains intact and the error
-explains what is needed. You can still edit and retry individual tools yourself.
-
-The useful-page count carries forward; collection units start at zero for each
-continuation. Set the useful-page goal higher before continuing a completed case
-to request more evidence. Each continuation respects your selected tools, query,
-public context, collection ceiling and a fresh 300-second soft deadline. It stops
-when the goal is met, fresh strategies and eligible sources are exhausted, a limit
-is reached, or you press **Stop**. Uncertainty changes strategy; it never confirms
-identity or alone declares success. Original sources and prior
-reports remain saved. Continuing does not confirm identity or guarantee new results.
-
-Previously attempted page URLs and provider/query pairs are skipped automatically;
-the same public query can be tried on another selected provider. Login
-and access-barrier hosts are excluded from follow-up, with visible `-site:` search
-exclusions added when they fit the public query limit. The planner can follow saved
-leads from selected web, Wikipedia, Wikidata and news sources; fresh discovery uses
-public web search when selected. Repeated or stalled planner choices trigger a
-different recovery strategy instead of immediately ending the run. A failed search
-provider is disabled for the remainder of that run; another configured provider can
-be used. Recovery choices and provider switches are visible in the plan and activity.
-Individual provider/domain retries remain available in tool activity, including an
-explicit choice of provider for a web search. Exhausted eligible sources, unavailable
-providers or unresolved uncertainty can still leave a partial investigation, with
-the stop reason shown. The request ceiling, deadline and **Stop** bound recovery.
-Final continuation
-drafting reads saved evidence locally and cannot launch more network tools.
-
-With a chosen public context, local AI also compares readable collected pages
-against the target role/location and private clues. Likely namesakes stay saved
-but do not fill the useful-page goal. Editing context lets the next continuation
-reconsider that derived assessment without fetching originals again. Missing
-context alone does not establish a mismatch; uncertain candidates remain labelled
-unconfirmed. Login walls and empty shells never become useful through this step.
-
-Open **Recovery settings and AI prompts** to choose DuckDuckGo Lite, Bing or both.
-Both are enabled by default; deselect a provider to keep automatic search and
-recovery from using it. Each request names its provider in tool activity, and
-**Edit & retry** lets you switch providers for an individual search.
-
-The six local prompts cover planning, repetition, provider failure, no useful pages,
-identity ambiguity and the final draft. Edit the guidance to suit the investigation;
-each prompt accepts up to 4,000 characters, with a combined 12,000-character limit.
-Settings are saved with local run options
-and carried into continuations. **Restore recovery defaults** changes the current
-form only; it does not alter saved reports, sources or start collection. New runs and
-continuations use the values currently in the form.
-
-Prompts guide the local model but cannot expand allowed tools, public providers,
-outbound query scope or private-data handling. Known private identifiers remain local
-comparison context. Custom prompts are stored with local run settings and can appear
-in exports; keep private identifying clues in **Known identifiers** rather than
-embedding them in prompt text. Guidance cannot guarantee useful results or identity.
-
-Install [llama.cpp](https://github.com/ggml-org/llama.cpp) and download the model once:
+Install [llama.cpp](https://github.com/ggml-org/llama.cpp) and cache a compatible
+GGUF yourself. Example one-time download through an independently installed
+Hugging Face CLI:
 
 ```sh
 hf download terrorswift/REDCELL-26B-A4B-OSINT-Cyber-APEX-GGUF --include '*I-Compact.gguf'
 ```
 
-The app detects the cached exact I-Compact GGUF (about 14.7 GB). No automatic model
-or package downloads occur when investigating or starting AI. For another local
-GGUF, launch with `./start.sh --model /absolute/path/to/model.gguf`. The model must
-support tool calling; REDCELL I-Compact was tested with the installed llama.cpp.
+The app detects the exact cached I-Compact GGUF, about 14.7 GB. Investigating and
+starting AI never download models or install packages. A trusted launcher
+`--model` flag selects another local GGUF. Tool calling and sufficient memory are
+required; other model families need separate qualification.
 
-**Start local AI** owns a separate authenticated loopback llama-server process.
-No shell commands, arbitrary files or remote AI endpoints are exposed to the model.
-The app provides these tools; you do not need to install an extra tool server:
+Open **Optional local AI**, press **Start local AI**, wait for Ready and enable
+analysis. **Analyze collected evidence** retries drafting independently.
+Continuation starts the owned cached model automatically. Only app-owned model
+processes are stopped; unrelated llama.cpp sessions remain untouched.
 
-| Tool | Capability |
-| --- | --- |
-| `web_search` | Send a subject-scoped query through a configured public provider and discover sources |
-| `search_subject` | Read this run's public candidate search results |
-| `news_search` | Read this run's recent news search results |
-| `collect_page` | Collect a relevant discovered URL or approved link from a collected page |
-| `domain_signals` | Collect an approved domain's public records |
-| `read_evidence` | Read a collected source from this run |
+Eight editable prompts cover planning, repetition, provider failure, no useful
+pages, identity ambiguity, draft writing, action selection and exact-passage
+extraction. Under **Recovery settings and AI prompts**, each accepts 1–4,000
+characters, with a combined 12,000-character limit. Prompts persist in local run
+options. **Restore recovery defaults** changes the form, not saved reports or
+sources. Prompts cannot expand permissions, outbound scope or resource limits.
 
-`search_subject` and `news_search` reuse collected results; `web_search` performs
-real searches. Model queries must include the subject's name or alias and use only
-approved public context, source domains, words observed in returned public titles/snippets,
-and bounded profile/news keywords. Saved private clues remain blocked even when a
-clue's words also appear in a public result. The model
-cannot send unrelated queries, fetch invented URLs, access other cases or execute
-commands. Tool activity exposes its actual calls and failures. The assistant loop
-allows up to four model turns and six tool calls; local relevance comparisons are
-separate model requests. Generation is bounded to 512 tokens per request. AI drafts can be
-wrong and remain labelled unverified. The model is directed to search and follow a
-relevant page; successful evidence reading is required before a draft is accepted
-when sources exist. A required search/tool failure leaves the draft incomplete.
-The first AI search is offered your configured public query, adding the quoted subject
-only if no complete subject or alias is present. Required page/evidence calls choose
-from available leads and saved source IDs. Model search queries cap at 200 characters;
-shorten the query if adding the subject would exceed this limit.
-Source references let you check the result. Token-limited drafts are explicitly
-marked incomplete and retained for inspection. Later timeouts preserve completed
-tool calls, so you can inspect them and retry analysis.
-Cached tool reuse is also visible and uses no collection unit. AI follow-up prefers
-untried leads; use an individual retry to attempt a previously failed page again.
+Case-scoped SQLite retrieval brings relevant evidence into draft context rather
+than relying only on the earliest pages. FTS5 is used when available, with a local
+literal-search fallback. Extracted observations must match source text exactly
+before being saved. Draft citations remain unverified: a valid evidence ID alone
+does not prove every sentence is supported. Inspect the cited passage.
 
-Private contact identifiers and case context are supplied only to the owned local
-model and the deterministic local comparator for judging public leads. This private
-prompt context is not copied into investigation reports or prompt logs, is not
-appended to web queries, and does not expand the model's allowed public vocabulary.
-The model is asked to avoid repeating raw private identifiers. An output guard also
-redacts literal clue echoes and formatted phone echoes from drafts and rejected tool
-activity, including timeout traces. This is not a general anonymizer: inspect drafts
-before sharing them. Its context assessment remains an unverified hint.
-An unlikely namesake does not fill the useful-page goal unless a direct identifier
-match corroborates it. Explicit public URL/domain leads retain their separate
-collection behavior; private contact hints are not treated as outbound leads.
-**Stop local AI** or stopping the app shuts down only its owned model process.
-Initial loading can take a minute and requires enough free memory. External model
-servers and unrelated llama.cpp sessions are left alone.
+Private clues go to local comparison, not public searches. Output guards reduce
+literal/private-contact echoes but cannot detect all inference or paraphrase.
+Inspect drafts before sharing; case exports intentionally retain private fields.
+
+## Optional SearXNG setup
+
+The core works without Docker or SearXNG. Install and start Docker yourself. Open
+**Source packs and collection time → Optional local metasearch**, review options,
+then press **Set up & start metasearch**. This explicit action may download the
+selected official image. Ordinary investigations do not silently install,
+download or start a missing search service.
+
+Only `docker.io/searxng/searxng` tags or SHA-256 digests are accepted. Setup records
+an immutable local image ID; container creation uses that ID with pulling disabled.
+Choose Bing, DuckDuckGo and/or Brave. Stop the owned service before changing setup.
+The app does not install or stop Docker itself.
+
+No host port is published. A fixed Docker-exec client contacts container-private
+loopback; the browser cannot choose another metasearch endpoint. The container
+has no host bind mounts or Docker socket, drops capabilities and applies bounded
+memory, CPU, PID and request settings. Labelled ownership records support cleanup
+and reconciliation after interruptions.
+
+SearXNG makes its own external requests. They **do not inherit the core
+collector's DNS validation or IP pinning**. Engine selection, timeouts and disabled
+retries constrain behavior but do not make the transports equivalent. Upstream
+engines see approved queries and the network's public IP. Read
+[security](SECURITY.md) and [qualification status](docs/validation.md).
 
 ## Collection and privacy
 
-| Source | Collected signal | What goes outside your machine |
-| --- | --- | --- |
-| Configured DuckDuckGo Lite / Bing public search | Up to 10 public web results per search | Full query, including chosen public context; AI's approved query refinements |
-| Wikipedia / Wikidata | Candidates, profiles, relationship labels and a page | Subject name or first alias; selected public IDs and page requests |
-| GDELT / linked news sites | Up to 8 recent mentions; up to 2 article pages | Quoted subject name; selected article requests |
-| Local comparator and llama.cpp (optional) | Compare private known clues with public results; draft summary | Nothing: local comparison and authenticated loopback; cached model only |
-| OS DNS resolver | A/AAAA address results | Requested domain |
-| IANA + domain registry | RDAP registration response | Registry sees requested domain; IANA sees bootstrap request |
-| Domain TLS endpoint | Verified certificate and DER bytes | Requested hostname and connection |
-| Public HTTPS sites and redirect destinations | Selected pages, up to 2 MiB each | Requested hostname, path and allowed query parameters at every hop |
+| Recipient | Outbound data |
+| --- | --- |
+| DuckDuckGo Lite / Bing | Approved public query, context and refinements |
+| Crossref / GeoNames | Chosen public research/locality query |
+| GitHub / GitLab | Approved account handle/profile request |
+| Internet Archive | Public URL whose archived availability is requested |
+| Wikipedia / Wikidata / GDELT | Public subject query, selected IDs and page requests |
+| Public websites and redirects | Host, path and permitted query parameters |
+| DNS / IANA / registries / TLS endpoint | Relevant domain/hostname |
+| SearXNG upstream engines | Approved query sent to selected engines |
+| Docker registry during explicit setup | Official image request/network metadata |
+| Local email analysis / SQLite / llama.cpp | No outbound request for local processing |
 
-Destination services can see your public IP address. System DNS behavior depends
-on your OS/network. Local processing is private; network collection is observable.
-There are no credentials or cookies sent to providers, no proxy environment use,
-no automatic retry of failed requests, and only bounded follow-up of discovered
-public pages and links. Requests have size and
-socket timeout limits. OS DNS resolution has the OS's timeout policy.
+Core HTTPS collection requires public HTTPS port 443, rejects URL credentials,
+fragments/private destinations, validates DNS and pins a public address with TLS
+hostname verification. Up to three redirects repeat those checks. Investigation
+page tools permit query parameters; CLI `fetch` retains its no-query restriction.
+Do not supply signed or private links.
 
-Collection permits public HTTPS on port 443. Private/special-use addresses,
-credentials in URLs and HTTPS-to-HTTP downgrades are blocked. Investigation and
-individual page tools permit query parameters because public profile/search URLs
-often need them. Treat queries as outbound data: avoid private identifiers, access
-tokens or signed links. At most three redirects are followed, with public-address
-validation, IP pinning and TLS verification repeated for every destination. Each
-redirect destination can observe the request it receives. Final page URLs stay in
-source evidence. Fragments are not accepted by page tools; result fragments are
-removed before collection. The standalone CLI `fetch` command retains its simpler
-no-query restriction.
+Sources can be blocked, rate limited, stale, JavaScript-only, incomplete or
+malicious. The app does not bypass login, CAPTCHA or access controls. Public
+profile checks do not use password-reset/account-recovery queries. No breach
+aggregation, people-search brokers, facial recognition, vulnerability scanning or
+cloud sync is included. Local processing does not anonymize collection.
 
-Login-required, JavaScript-only, non-UTF-8 or unsupported content may be unavailable.
-The app reports failure instead of silently claiming no results. Registration strips
-a leading `www.` from the website host; other subdomains can lack registration
-records. Candidate HTTP website claims may be attempted over HTTPS, with normal
-certificate verification.
+## Storage, upgrades and recovery
 
-See [security and privacy](SECURITY.md) for controls, assumptions and limits.
+Default storage: `.local-osint/evidence.sqlite3`. It holds cases, immutable
+originals/hashes, extracted text, indicators, reports, settings, actions, attempts,
+candidates and exact-passage references. Same case + source + hash deduplicates;
+changed content becomes separate evidence. Hashes detect changed bytes relative
+to a reference, not authorship or truth.
 
-## Configure
-
-The UI needs no configuration file or API keys. Useful launcher options:
+First opening a schema-1 database makes a consistent, integrity-checked owner-only
+backup at `.local-osint/backups/schema1-<unique-id>.sqlite3`, then transactionally
+adds schema-2 workspace tables in the existing database. Historical report/evidence
+IDs remain. Imported history stays historical and unconfirmed; migration never
+turns snippets into verified identities or starts outbound collection. Stop other
+app/CLI writers before upgrading and retain the pre-upgrade backup.
 
 ```sh
-./start.sh --port 9000                      # request a specific free port
-./start.sh --data-dir ./private-cases       # choose private local storage
-./start.sh --offline                       # prohibit collection
+.venv/bin/python -m local_osint backup evidence-backup.sqlite3
 ```
 
-The data directory is created with owner-only permissions. An existing directory
-must already be private. On macOS/Linux use `chmod 700` for the data directory and
-`chmod 600` for its database if necessary. Symlinked data paths are rejected;
-choose their real paths. Do not put cases inside a shared or cloud-synced directory.
+To restore or roll back: stop every process using the destination; retain the
+current private directory; create a separate owner-only directory; copy the
+chosen backup there as `evidence.sqlite3` with mode `600`; launch with `--data-dir`
+pointing there. This version upgrades restored schema-1 backups again. Use a
+previous compatible app version to remain on schema 1. Never overwrite an open
+database. JSON export is not a database restore format.
 
-Optional `osint.toml`:
+POSIX data directories require `700`; database/backup files require `600`.
+Symlinked data paths are refused. Avoid shared or cloud-synced folders. Disk
+encryption, total disk space, backup retention and download permissions remain
+OS/user responsibilities. No case/evidence deletion or automatic backup pruning
+is performed.
+
+Optional launcher `osint.toml`:
 
 ```toml
 data_dir = "private-cases"
-port = 0 # automatically choose a free local port
+port = 0
 ```
 
 ```sh
 ./start.sh --config osint.toml
 ```
 
-Relative `data_dir` paths in TOML resolve beside that file. Explicit command options
-win. With no port configured, the OS selects a free port. An explicitly requested
-busy port fails with an actionable error; use `--port 0` to select a free port.
-Unknown keys or invalid ports fail visibly. Network permission is a launch
-flag, not a persisted preference. `--offline` disables it for that launch.
+Relative data paths resolve beside the config. Command options take precedence.
+Network permission remains a launch flag; source settings cannot enable networking
+in an offline process. Explicit occupied ports fail; `--port 0` chooses a free one.
+Unknown settings fail visibly.
 
-## CLI
+## CLI and development
 
-Use the same evidence engine without a browser:
+The CLI uses the same engine:
 
 ```sh
-.venv/bin/python -m local_osint case "Example Foundation" --type organization \
-  --alias "Example" --identifier example.org
+.venv/bin/python -m local_osint case "Example Foundation" --type organization --alias Example
 .venv/bin/python -m local_osint cases
-```
-
-Copy the returned case ID into the following commands:
-
-```sh
 .venv/bin/python -m local_osint import CASE_ID examples/sample.txt
 .venv/bin/python -m local_osint investigate CASE_ID --allow-network
-.venv/bin/python -m local_osint discover CASE_ID --allow-network
-.venv/bin/python -m local_osint discover CASE_ID --query "Known alias" \
-  --sources wikidata --allow-network
-.venv/bin/python -m local_osint research CASE_ID example.org \
-  --signals dns registration certificate website --allow-network
+.venv/bin/python -m local_osint discover CASE_ID --sources wikidata --allow-network
+.venv/bin/python -m local_osint research CASE_ID example.org --signals dns registration certificate website --allow-network
 .venv/bin/python -m local_osint fetch CASE_ID https://example.org/ --allow-network
 .venv/bin/python -m local_osint search CASE_ID example --kind domain
 .venv/bin/python -m local_osint entity CASE_ID ENTITY_ID
 .venv/bin/python -m local_osint export CASE_ID case-evidence.json
 .venv/bin/python -m local_osint export CASE_ID case-report.md --format markdown
-.venv/bin/python -m local_osint backup evidence-backup.sqlite3
 ```
 
-Each command accepts `--data-dir` and `--config`. CLI output is JSON; errors go to
-stderr. Investigation exits zero for complete or partial results; inspect its
-status and collection log. Discovery/research exits nonzero if any requested source
-fails, preserving successful evidence. Export and backup never overwrite existing files.
-CLI output files have owner-only permissions; browser download permissions are
-controlled by your browser and OS.
-
-## Storage, backup and recovery
-
-By default all case data lives in `.local-osint/evidence.sqlite3` inside the project.
-The database stores original evidence, derived searchable text, extracted indicators
-and source offsets. Imported file paths are not stored automatically—only basenames
-or your explicit source labels. Same bytes + same source + same case are deduplicated.
-A later changed page is a separate item with its own fingerprint and timestamp.
-
-Use the backup command above; it uses SQLite's consistent backup operation and
-checks integrity. To restore, stop every app/CLI process using the destination,
-keep its old private directory as a local backup, create a new directory with
-permissions `700`, and copy the backup into it as `evidence.sqlite3` with permissions
-`600`. Start with `--data-dir` pointing there. Do not overwrite a running database.
-The JSON export is an interchange/report artifact; it is not a database restore file.
-
-Nothing is deleted automatically. To remove an entire workspace, stop the app,
-verify the exact private data directory and backups, then remove them using your
-OS. The initial UI deliberately has no destructive actions. Disk encryption and
-backup retention remain your responsibility. Hashes detect changed bytes relative
-to an exported fingerprint; they do not prove authorship or truth.
-
-## Development and validation
+Commands accept `--data-dir` and `--config`. Investigation can return partial
+results with exit status zero; inspect tool outcomes. Export/backup refuse to
+overwrite files. Source-pack configuration and queue controls are in the app.
 
 ```sh
-python3 -m venv .venv
 .venv/bin/python -m unittest discover -s tests -v
+node --test tests/test_workspace_ui.cjs
 .venv/bin/python -m compileall -q local_osint tests
+node --check local_osint/static/app.js
 ```
 
-Tests use synthetic evidence and mock external providers. HTTP tests bind temporary
-loopback ports. No provider credentials, live targets or internet access required.
-See [design and acceptance](docs/design.md), [validation evidence](docs/validation.md),
-and [contributing](CONTRIBUTING.md).
+Python checks use private temporary databases, loopback listeners and controlled
+providers/models. Node controller tests require Node without packages; Node is not
+needed to run the app. Tests do not establish live-provider availability or model
+factual accuracy. See [validation](docs/validation.md), [design](docs/design.md),
+[security](SECURITY.md) and [contributing](CONTRIBUTING.md).
 
-Primary protocol references: [DuckDuckGo non-JavaScript search](https://duckduckgo.com/duckduckgo-help-pages/features/non-javascript),
-[Bing search operators](https://support.microsoft.com/en-us/bing/advanced-search-keywords),
+Protocol references: [Crossref REST API](https://www.crossref.org/documentation/retrieve-metadata/rest-api/),
+[GitHub public user API](https://docs.github.com/en/rest/users/users#get-a-user),
+[Wayback APIs](https://archive.org/help/wayback_api.php),
+[SearXNG API](https://docs.searxng.org/dev/search_api.html),
+[SearXNG outgoing settings](https://docs.searxng.org/admin/settings/settings_outgoing.html),
 [nginx proxy directives](https://nginx.org/en/docs/http/ngx_http_proxy_module.html),
-[IANA RDAP bootstrap registry](https://www.iana.org/assignments/rdap-dns/),
-[RDAP query format](https://www.rfc-editor.org/rfc/rfc9082.html),
-[MediaWiki search API](https://www.mediawiki.org/wiki/API:Search), and
-[Wikidata data access](https://www.wikidata.org/wiki/Wikidata:Data_access).
+[IANA RDAP bootstrap](https://www.iana.org/assignments/rdap-dns/), and
+[Wikidata access](https://www.wikidata.org/wiki/Wikidata:Data_access).
 
-Domain/email extraction validates ASCII domain suffixes against the bundled
+Domain/email extraction uses a bundled
 [IANA TLD snapshot](https://data.iana.org/TLD/tlds-alpha-by-domain.txt), dated
-2026-10-09. URL paths and query strings are excluded from standalone domain matches.
-This reduces filename/markup noise; it does not prove a domain exists, identify its
-owner, or recognize every internationalized spelling. No suffix update is fetched
-at runtime. Maintainers can replace `local_osint/tlds.txt` with the complete current
-IANA file, review the diff, rerun extraction tests and record its date/hash.
+2026-10-09. It reduces filename/markup noise without proving domain existence or
+ownership. No suffix update is downloaded at runtime.

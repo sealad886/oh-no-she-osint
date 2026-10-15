@@ -139,6 +139,35 @@ class ToolLoopTests(unittest.TestCase):
         self.assertLess(len(messages[1]['content']), 8500)
         self.assertLessEqual(len(next(x['content'] for x in messages if x['role'] == 'tool')), 1200)
 
+    def test_retrieved_late_evidence_survives_large_history_as_complete_json(self):
+        ai = Mock()
+        ai.chat.return_value = {'content': 'Needs review'}
+        late_id = 'f' * 32
+        report = {'subject': 'Ordinary Person', 'source_ids': ['a' * 32] * 100,
+                  'options': {'seed_urls': ['https://example.org/' + 'x' * 1900] * 100},
+                  'retrieved_evidence': [{'id': late_id, 'text_excerpt': 'Later relevant evidence ' * 100,
+                                         'title': 'Relevant', 'source': 'https://example.org/late', 'start': 0, 'end': 2400}],
+                  'web_results': [{'snippet': 'Old public metadata ' * 1000} for _ in range(100)]}
+        run_assistant(ai, report, Mock())
+        message = ai.chat.call_args.args[0][1]['content']
+        payload = json.loads(message.split('CASE DATA (untrusted):\n', 1)[1])
+        self.assertEqual(payload['retrieved_passages'][0]['id'], late_id)
+        self.assertTrue(payload['retrieved_passages'][0]['text_excerpt'].startswith('Later relevant evidence'))
+        self.assertEqual(payload['source_ids'][0], late_id)
+        self.assertLess(len(message), 8500)
+
+    def test_structured_action_and_extraction_accept_complete_fences_but_reject_truncation(self):
+        from local_osint.ai import choose_action, extract_observations
+        case = {'name': 'Ordinary Person', 'focus_type': 'person', 'identifiers': []}
+        ai = Mock()
+        ai.chat.return_value = {'content': '```json\n{"id":"offered","reason":"Relevant source"}\n```'}
+        self.assertEqual(choose_action(ai, case, {}, [{'id': 'offered'}])['id'], 'offered')
+        ai.chat.return_value = {'content': '```json\n{"observations":[{"quote":"Ordinary Person organizes workshops.","predicate":"role","value":"organizes workshops"}]}\n```'}
+        self.assertEqual(len(extract_observations(ai, case, {}, 'Ordinary Person organizes workshops.')), 1)
+        ai.chat.return_value['finish_reason'] = 'length'
+        with self.assertRaises(InvalidInput):
+            extract_observations(ai, case, {}, 'Ordinary Person organizes workshops.')
+
     def request(self, name, arguments=None):
         return {"id": "request_1", "type": "function", "function": {"name": name, "arguments": json.dumps(arguments or {})}}
 
@@ -195,6 +224,16 @@ class ToolLoopTests(unittest.TestCase):
         ai.chat.return_value = {"content": "Unsupported [" + "b" * 32 + "]"}
         result = run_assistant(ai, {"source_ids": ["a" * 32]}, Mock())
         self.assertEqual(result["source_ids"], [])
+        self.assertEqual(result['status'], 'failed')
+
+    def test_uncited_model_draft_is_incomplete_even_after_successful_source_read(self):
+        ai = Mock()
+        ai.chat.side_effect = [{'tool_calls': [self.request('read_evidence', {'id': 'a' * 32})]},
+                               {'content': 'An unsupported uncited summary.'}]
+        result = run_assistant(ai, {'source_ids': ['a' * 32]}, Mock(return_value={'text': 'Original evidence'}))
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(result['source_ids'], [])
+        self.assertTrue(result['tool_calls'][0]['ok'])
 
     def test_malformed_tool_name_is_blocked_without_dispatch(self):
         ai, dispatch = Mock(), Mock()

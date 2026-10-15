@@ -8,6 +8,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -96,7 +97,9 @@ http {{
             with os.fdopen(fd, "w") as stream:
                 stream.write(self.configuration())
             # A foreground master and worker in a process group owned by this launch.
-            self.process = subprocess.Popen([self.binary, "-p", str(self.runtime) + os.sep, "-c", str(configuration), "-e", str(self.runtime / "error.log")], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            command = [self.binary, "-p", str(self.runtime) + os.sep, "-c", str(configuration), "-e", str(self.runtime / "error.log")]
+            supervised = [sys.executable, str(Path(__file__).with_name('owned_process.py')), str(os.getpid()), '--', *command]
+            self.process = subprocess.Popen(supervised, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
                 if self.process.poll() is not None:
@@ -130,7 +133,7 @@ http {{
                     pass
             terminate_owned(signal.SIGTERM)
             try:
-                self.process.wait(timeout=3)
+                self.process.wait(timeout=7)
             except subprocess.TimeoutExpired:
                 terminate_owned(signal.SIGKILL)
                 self.process.wait(timeout=3)

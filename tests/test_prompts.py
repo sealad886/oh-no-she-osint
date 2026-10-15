@@ -10,7 +10,7 @@ from local_osint.prompts import DEFAULT_PROMPTS, validate_prompts
 class PromptConfigurationTests(unittest.TestCase):
     def test_defaults_merge_overrides_without_mutating_defaults(self):
         defaults = validate_prompts()
-        self.assertEqual(set(defaults), {'plan', 'repetition', 'provider_failure', 'no_useful_pages', 'identity_ambiguity', 'draft'})
+        self.assertEqual(set(defaults), {'plan', 'repetition', 'provider_failure', 'no_useful_pages', 'identity_ambiguity', 'draft', 'action', 'extract'})
         changed = validate_prompts({'repetition': 'Try an independent publication source.'})
         self.assertEqual(changed['repetition'], 'Try an independent publication source.')
         self.assertEqual(changed['plan'], DEFAULT_PROMPTS['plan'])

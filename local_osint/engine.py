@@ -195,7 +195,7 @@ class Engine:
             os.close(fd)
         with self.connection() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1):
+            if version not in (0, 1, 2):
                 raise InvalidInput("Unsupported database version. Restore a compatible backup.")
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS cases (
@@ -217,8 +217,9 @@ class Engine:
                 CREATE INDEX IF NOT EXISTS evidence_case ON evidence(case_id);
                 CREATE INDEX IF NOT EXISTS entities_case ON entities(case_id);
                 CREATE INDEX IF NOT EXISTS mentions_evidence ON mentions(evidence_id);
-                PRAGMA user_version = 1;
             """)
+        from .workspace import initialize_storage
+        initialize_storage(self, version)
 
     @contextmanager
     def connection(self):
@@ -335,6 +336,7 @@ class Engine:
         return result
 
     def export(self, case_id):
+        from .workspace import Workspace
         with self.connection() as db:
             # One read transaction keeps report tables on the same snapshot.
             db.execute("BEGIN")
@@ -346,8 +348,10 @@ class Engine:
                 evidence.append(item)
             entities = [dict(x) for x in db.execute("SELECT * FROM entities WHERE case_id=? ORDER BY kind,value", (case_id,))]
             mentions = [dict(x) for x in db.execute("SELECT m.* FROM mentions m JOIN evidence e ON m.evidence_id=e.id WHERE e.case_id=? ORDER BY m.evidence_id,m.start", (case_id,))]
+            workspace = Workspace(self).snapshot(case_id, connection=db)
         reports = [json.loads(item['text']) for item in evidence if item['source'] == 'local-osint:investigation-report']
-        return {"schema_version": 1, "exported_at": now(), "case": case, "evidence": evidence, "entities": entities, "mentions": mentions,
+        return {"schema_version": 2, "exported_at": now(), "case": case, "evidence": evidence, "entities": entities, "mentions": mentions,
+                "workspace": workspace,
                 "investigation": reports[-1] if reports else None,
                 "interpretation": "Indicators are extracted mentions. Shared sources do not establish ownership or identity."}
 

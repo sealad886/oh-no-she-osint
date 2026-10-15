@@ -1,8 +1,11 @@
 import json
+import gzip
+import io
 from pathlib import Path
 import socket
 import tempfile
 import unittest
+import zlib
 from unittest.mock import Mock, patch
 
 from local_osint.collector import collect, domain_name, fetch_public, PinnedHTTPS, public_address, research, target
@@ -107,7 +110,7 @@ class CollectorTests(unittest.TestCase):
             self.assertEqual(request_headers['Accept-Encoding'], 'identity')
             factory.return_value.close.assert_called_once()
 
-    def test_redirects_compression_binary_and_oversize_fail_without_evidence(self):
+    def test_redirects_malformed_compression_binary_and_oversize_fail_without_evidence(self):
         cases = [self.response(status=302), self.response(headers={'Content-Type':'text/plain', 'Content-Encoding':'gzip'}), self.response(headers={'Content-Type':'image/png'}), self.response(headers={'Content-Type':'text/plain', 'Content-Length':str(MAX_BYTES+1)}), self.response(body=b'x' * (MAX_BYTES+1), headers={'Content-Type':'text/plain'})]
         for response in cases:
             with patch('local_osint.collector.target', return_value=('example.org', '8.8.8.8', '/', 'https://example.org/')), patch('local_osint.collector.PinnedHTTPS') as factory:
@@ -115,6 +118,75 @@ class CollectorTests(unittest.TestCase):
                 with self.assertRaises(InvalidInput):
                     collect(self.engine, self.case, 'https://example.org/', True)
                 factory.return_value.close.assert_called_once()
+        self.assertEqual(self.engine.view(self.case)['counts']['evidence'], 0)
+
+    def test_gzip_and_deflate_decode_utf8_entity_bytes_before_saving(self):
+        original = 'Public profile: Zoë — organization@example.org'.encode('utf-8')
+        previous = self.engine.ingest(self.case, b'Existing original', 'Existing')
+        for encoding, compressed in (('gzip', gzip.compress(original)), ('deflate', zlib.compress(original))):
+            with self.subTest(encoding=encoding):
+                response = self.response(body=compressed, headers={'Content-Type': 'text/plain', 'Content-Encoding': encoding, 'Content-Length': str(len(compressed))})
+                response.read1.side_effect = [compressed[:3], compressed[3:11], compressed[11:], b'']
+                with patch('local_osint.collector.target', return_value=('example.org', '8.8.8.8', '/', 'https://example.org/')), patch('local_osint.collector.PinnedHTTPS') as factory:
+                    factory.return_value.getresponse.return_value = response
+                    saved = collect(self.engine, self.case, 'https://example.org/', True)
+                with self.engine.connection() as db:
+                    self.assertEqual(db.execute('SELECT raw FROM evidence WHERE id=?', (saved['id'],)).fetchone()[0], original)
+                    self.assertEqual(db.execute('SELECT raw FROM evidence WHERE id=?', (previous['id'],)).fetchone()[0], b'Existing original')
+
+    def test_compression_bombs_are_rejected_at_decoded_limit(self):
+        payload = b'A' * (MAX_BYTES + 1)
+        for encoding, compressed in (('gzip', gzip.compress(payload)), ('deflate', zlib.compress(payload))):
+            self.assertLess(len(compressed), MAX_BYTES)
+            response = self.response(body=compressed, headers={'Content-Type': 'text/plain', 'Content-Encoding': encoding})
+            with self.subTest(encoding=encoding), patch('local_osint.collector.target', return_value=('example.org', '8.8.8.8', '/', 'https://example.org/')), patch('local_osint.collector.PinnedHTTPS') as factory:
+                factory.return_value.getresponse.return_value = response
+                with self.assertRaisesRegex(InvalidInput, 'evidence limit'):
+                    collect(self.engine, self.case, 'https://example.org/', True)
+        self.assertEqual(self.engine.view(self.case)['counts']['evidence'], 0)
+
+    def test_compressed_wire_limit_is_independent_of_decoded_limit(self):
+        compressed = gzip.compress(b'Public text')
+        response = self.response(body=compressed, headers={'Content-Type': 'text/plain', 'Content-Encoding': 'gzip', 'Content-Length': str(MAX_BYTES + 1)})
+        with patch('local_osint.collector.target', return_value=('example.org', '8.8.8.8', '/', 'https://example.org/')), patch('local_osint.collector.PinnedHTTPS') as factory:
+            factory.return_value.getresponse.return_value = response
+            with self.assertRaises(InvalidInput):
+                collect(self.engine, self.case, 'https://example.org/', True)
+        response.read1.assert_not_called()
+        # A legal gzip filename field can exhaust the wire budget without
+        # producing decoded text. Exercise the actual read limit, not just a
+        # server's Content-Length declaration.
+        wire = compressed[:3] + bytes([compressed[3] | 8]) + compressed[4:10] + b'n' * MAX_BYTES + b'\0' + compressed[10:]
+        response = self.response(body=wire, headers={'Content-Type': 'text/plain', 'Content-Encoding': 'gzip'})
+        response.read1.side_effect = io.BytesIO(wire).read
+        with patch('local_osint.collector.target', return_value=('example.org', '8.8.8.8', '/', 'https://example.org/')), patch('local_osint.collector.PinnedHTTPS') as factory:
+            factory.return_value.getresponse.return_value = response
+            with self.assertRaisesRegex(InvalidInput, 'wire limit'):
+                collect(self.engine, self.case, 'https://example.org/', True)
+
+    def test_exact_decoded_limit_is_accepted(self):
+        original = b'A' * MAX_BYTES
+        compressed = gzip.compress(original)
+        response = self.response(body=compressed, headers={'Content-Type': 'text/plain', 'Content-Encoding': 'gzip'})
+        with patch('local_osint.collector.target', return_value=('example.org', '8.8.8.8', '/', 'https://example.org/')), patch('local_osint.collector.PinnedHTTPS') as factory:
+            factory.return_value.getresponse.return_value = response
+            saved = collect(self.engine, self.case, 'https://example.org/', True)
+        with self.engine.connection() as db:
+            self.assertEqual(db.execute('SELECT length(raw) FROM evidence WHERE id=?', (saved['id'],)).fetchone()[0], MAX_BYTES)
+
+    def test_truncated_corrupted_trailing_and_unsupported_encodings_are_rejected(self):
+        compressed = gzip.compress(b'Public UTF-8 text')
+        deflated = zlib.compress(b'Public UTF-8 text')
+        cases = [('gzip', compressed[:-1]), ('deflate', deflated[:-1]), ('gzip', compressed[:-4] + b'bad!'), ('gzip', compressed + b'trailing'), ('gzip', compressed + compressed), ('gzip', b'not compressed'), ('br', b'anything'), ('gzip, deflate', compressed)]
+        for encoding, body in cases:
+            response = self.response(body=body, headers={'Content-Type': 'text/plain', 'Content-Encoding': encoding})
+            # Trailing data may arrive in a later network chunk too.
+            if body == compressed + b'trailing':
+                response.read1.side_effect = [compressed, b'trailing', b'']
+            with self.subTest(encoding=encoding, body_length=len(body)), patch('local_osint.collector.target', return_value=('example.org', '8.8.8.8', '/', 'https://example.org/')), patch('local_osint.collector.PinnedHTTPS') as factory:
+                factory.return_value.getresponse.return_value = response
+                with self.assertRaises(InvalidInput):
+                    collect(self.engine, self.case, 'https://example.org/', True)
         self.assertEqual(self.engine.view(self.case)['counts']['evidence'], 0)
 
     def test_collection_errors_hide_private_details(self):

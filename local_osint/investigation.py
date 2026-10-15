@@ -15,6 +15,7 @@ from .engine import InvalidInput, now, field
 from .page_quality import assess_page
 from .relevance import local_match, rank_key, words, outbound_private_clues
 from .prompts import validate_prompts
+from .workspace import Workspace
 
 REPORT_SOURCE = 'local-osint:investigation-report'
 PROPERTIES = {'P31': 'Type', 'P856': 'Official website (candidate claim)', 'P17': 'Country',
@@ -30,7 +31,7 @@ MAX_SAFE_INTEGER = 2 ** 53 - 1  # Preserve exact values in the browser's JSON nu
 
 def options_for(case, values=None):
     values = {} if values is None else values
-    if not isinstance(values, dict) or set(values) - {'query', 'context', 'tools', 'max_requests', 'page_limit', 'providers', 'prompts'}:
+    if not isinstance(values, dict) or set(values) - {'query', 'context', 'tools', 'max_requests', 'page_limit', 'providers', 'prompts', 'packs', 'public_usernames', 'seed_urls', 'runtime_seconds', 'keep_working'}:
         raise InvalidInput('Invalid investigation settings.')
     result = {'query': field(values.get('query', ''), 'Public search query', 200, False) or '"' + case['name'] + '"',
               'context': field(values.get('context', ''), 'Public search context', 200, False),
@@ -38,9 +39,11 @@ def options_for(case, values=None):
               'max_requests': values.get('max_requests', 24), 'page_limit': values.get('page_limit', 4),
               'providers': values.get('providers', list(collector.SEARCH_PROVIDERS)),
               'prompts': validate_prompts(values.get('prompts'))}
+    from .frontier import source_settings
+    result.update(source_settings(values))
     if not isinstance(result['providers'], list) or not result['providers'] or any(not isinstance(p, str) or p not in collector.SEARCH_PROVIDERS for p in result['providers']) or len(set(result['providers'])) != len(result['providers']):
         raise InvalidInput('Select supported search providers without duplicates.')
-    if not isinstance(result['tools'], list) or not result['tools'] or any(not isinstance(t, str) or t not in SOURCES for t in result['tools']) or len(set(result['tools'])) != len(result['tools']):
+    if not isinstance(result['tools'], list) or (not result['tools'] and not result['packs']) or any(not isinstance(t, str) or t not in SOURCES for t in result['tools']) or len(set(result['tools'])) != len(result['tools']):
         raise InvalidInput('Select at least one supported source, without duplicates.')
     for name in ['max_requests', 'page_limit']:
         if type(result[name]) is not int or not 1 <= result[name] <= MAX_SAFE_INTEGER:
@@ -111,7 +114,7 @@ class Halt(Exception):
 
 
 class Investigation:
-    def __init__(self, engine, case_id, enabled=False, progress=None, cancel=None, ai=None, run_id=None, deadline_seconds=300, options=None, previous=None, local_only=False, continuing=False):
+    def __init__(self, engine, case_id, enabled=False, progress=None, cancel=None, ai=None, run_id=None, deadline_seconds=300, options=None, previous=None, local_only=False, continuing=False, search_service=None):
         if not enabled and not local_only:
             raise InvalidInput('Investigation collection is off. Restart with --allow-network.')
         with engine.connection() as db:
@@ -119,11 +122,16 @@ class Investigation:
         self.engine, self.case_id, self.progress, self.ai, self.enabled = engine, case_id, progress, ai, enabled
         self.cancel = cancel or threading.Event()
         self.options = options_for(self.case, options)
-        self.deadline = time.monotonic() + deadline_seconds
+        duration = self.options['runtime_seconds'] if deadline_seconds == 300 else deadline_seconds
+        unbounded = deadline_seconds == 300 and (self.options['keep_working'] or self.options['runtime_seconds'] == 0)
+        self.deadline = float('inf') if unbounded else time.monotonic() + duration
         self.used = 0
         self.allowed_urls, self.allowed_domains = set(), set()
         self.pages, self.domains = {}, {}
         self.failed_providers = set()
+        self.workspace = Workspace(engine)
+        self.search_service = search_service
+        self._queue_task = None
         self.active_provider = self.options['providers'][0]
         self.continuing = continuing
         self.report = {'report_type': 'investigation', 'run_id': run_id or uuid.uuid4().hex,
@@ -201,12 +209,23 @@ class Investigation:
 
     def step(self, label, callback, cost=1, tool=None, arguments=None):
         self.check(cost)
+        task = None
+        queued = self._queue_task if self._queue_task and self._queue_task['connector'] == tool else None
+        if (cost and tool) or queued:
+            task = queued or self.workspace.enqueue(self.case_id, tool, arguments or {}, reason=label)
+            if task['state'] not in {'pending', 'queued', 'running'}:
+                task = self.workspace.edit_action(self.case_id, task['id'], state='pending')
+            if task['state'] != 'running':
+                task = self.workspace.start_action(self.case_id, task['id'], self.report['run_id'])
         entry = {'id': uuid.uuid4().hex, 'run_id': self.report['run_id'], 'label': label, 'ok': False,
                  'tool': tool, 'arguments': arguments or {}, 'status': 'running', 'origin': self.origin, 'started_at': now()}
         self.report['steps'].append(entry)
+        if task:
+            entry['task_id'] = task['id']
         started = time.monotonic()
         self.report['active_tool'] = entry['id']
         self.publish(label)
+        result = None
         try:
             result = callback()
             self.remember(result)
@@ -215,6 +234,8 @@ class Investigation:
                 entry.update(ok=False, status='failed', error=result.get('warning') or 'Local AI did not complete its draft. Retry analysis.')
             if result.get('id'):
                 entry['source_id'] = result['id']
+            if result.get('_action_status') in {'blocked', 'rate_limited', 'uninterpretable', 'error'}:
+                entry.update(ok=False, status='failed', error=result.get('summary', 'Source tool unavailable.'))
             return result
         except (InvalidInput, OSError, http.client.HTTPException, ValueError, KeyError, TypeError, RecursionError) as exc:
             entry['error'] = str(exc) if isinstance(exc, InvalidInput) else 'Source unavailable or response could not be interpreted.'
@@ -227,6 +248,19 @@ class Investigation:
             if entry['status'] == 'running':
                 entry['status'] = 'cancelled'
             entry.update(finished_at=now(), duration_ms=round((time.monotonic() - started) * 1000))
+            if task:
+                action_status = (result or {}).get('_action_status')
+                retry = None
+                if action_status == 'rate_limited':
+                    from datetime import datetime, timedelta, timezone
+                    retry = (datetime.now(timezone.utc) + timedelta(seconds=300)).isoformat()
+                finished_state = ('cooldown' if retry else 'blocked' if action_status in {'blocked', 'uninterpretable'} else
+                    'complete' if entry.get('ok') else 'interrupted_after_dispatch' if entry['status'] == 'cancelled' else 'failed')
+                self.workspace.finish_action(self.case_id, task['id'],
+                    finished_state,
+                    result=(result or {}).get('_outcome') or {'summary': entry.get('result_summary', ''), 'duration_ms': entry['duration_ms']},
+                    evidence_ids=(result or {}).get('_evidence_ids') or ([entry['source_id']] if entry.get('source_id') else []),
+                    error=entry.get('error'), retry_at=retry)
             self.report['active_tool'] = None
             self.publish()
 
@@ -261,7 +295,7 @@ class Investigation:
         private_clues = outbound_private_clues(self.case, self.options)
         normalized_query = ' ' + ' '.join(words(query)) + ' '
         private_phrase = any(' ' + ' '.join(words(clue)) + ' ' in normalized_query
-                             for clue in private_clues if words(clue) and not clue.startswith('https://'))
+                             for clue in private_clues if words(clue))
         if private_phrase or private_output(query, private_clues) != query or not self.relevant(query) or set(words(query)) - allowed or any(c in query for c in '@\\\n\r'):
             raise InvalidInput('AI searches must use the subject name and approved public context or source domains.')
         return query
@@ -363,6 +397,8 @@ class Investigation:
     def page(self, url):
         if not self.enabled:
             raise InvalidInput('Web collection is off for this app session.')
+        from .frontier import Frontier
+        Frontier(self).guard('collect_page', {'url': url})
         if url not in self.allowed_urls:
             raise InvalidInput('Only URLs discovered for this investigation may be collected.')
         if url in self.pages:
@@ -404,9 +440,12 @@ class Investigation:
             self.allowed_urls.add(evidence['source'])
             page = {'url': url, 'final_url': evidence['source'], 'source_id': saved['id'], 'run_id': self.report['run_id'],
                     'excerpt': quality['text'][:1800], 'links': links, 'useful': useful,
+                    'readable': quality['useful'],
                     'quality_reason': reason, 'local_match': match, 'content_relevant': content_relevant,
                     'content_quality_reason': quality['reason'], 'context_excluded': content_relevant and not useful}
             self.report['pages'] = [p for p in self.report['pages'] if p['url'] != url] + [page]
+            from .frontier import Frontier
+            Frontier(self).record_page(page, evidence)
             for lead in self.report['web_results']:
                 if lead['url'] == url:
                     lead['page_source_id'] = saved['id']
@@ -532,6 +571,10 @@ class Investigation:
         def analyze():
             if not self.report.get('local_comparison'):
                 self.compare_locally()
+            self.report['retrieved_evidence'] = self.workspace.retrieve(self.case_id,
+                self.case['name'] + ' ' + self.options['context'], limit=8)
+            for passage in self.report['retrieved_evidence']:
+                self.remember({'id': passage['id']})
             result = run_assistant(self.ai, self.report, self.dispatch, lambda: self.check(),
                                    activity=lambda message: self.publish(message), private_context=self.case['identifiers'])
             self.report['ai'] = result
@@ -598,6 +641,10 @@ class Investigation:
 
     def pipeline(self):
         selected = self.options['tools']
+        from .frontier import Frontier
+        frontier = Frontier(self)
+        frontier.seed()
+        frontier.run_queue()
         def search(query):
             providers = [p for p in self.options['providers'] if p not in self.failed_providers]
             providers.sort(key=lambda p: p != self.active_provider)
@@ -661,7 +708,7 @@ class Investigation:
                     if page.get('id'):
                         article['page_source_id'] = page['id']
         known_domains = []
-        for value in ([self.case['name']] if self.case['focus_type'] == 'domain' else []) + self.case['identifiers']:
+        for value in ([self.case['name']] if self.case['focus_type'] == 'domain' else []) + self.options['seed_urls']:
             if '@' in value:
                 continue
             if value.startswith('https://'):
@@ -672,7 +719,7 @@ class Investigation:
                 self.allowed_domains.add(domain)
             except (InvalidInput, ValueError):
                 continue
-        for url in [v for v in self.case['identifiers'] if v.startswith('https://')][:2]:
+        for url in self.options['seed_urls'][:2]:
             if self.page_count() < self.options['page_limit']:
                 self.page(url)
         domain = next(iter(known_domains), None) or next(iter(sorted(self.allowed_domains)), None)
@@ -685,6 +732,8 @@ class Investigation:
         elif 'domain' in selected:
             self.skip('Domain signals', 'No subject domain supplied or identified. Email-provider domains are not researched automatically.', 'domain_signals')
         self.publish('Public collection finished', persist=True)
+        frontier.discover_report()
+        frontier.run_queue()
         if self.ai:
             self.analyze()
 
@@ -791,6 +840,14 @@ class Investigation:
             state = self.ai.status()
         if state['state'] != 'ready':
             raise InvalidInput(state.get('error') or 'Local AI is unavailable. Saved evidence is retained.')
+        # Model preparation has its own bounded timeout and does not consume collection time.
+        if not self.options['keep_working'] and self.options['runtime_seconds']:
+            self.deadline = time.monotonic() + self.options['runtime_seconds']
+        from .frontier import Frontier
+        frontier = Frontier(self)
+        frontier.seed()
+        frontier.discover_report()
+        frontier.run_queue()
         self.compare_pages_locally(self.report['pages'])
         attempted = {(s.get('arguments', {}).get('provider', 'duckduckgo'), self.query_key(s.get('arguments', {}).get('query', '')))
                      for s in self.report['steps'] if s.get('tool') == 'web_search'}
@@ -865,6 +922,8 @@ class Investigation:
                 attempted.add((args['provider'], self.query_key(args['query'])))
             before_pages = self.page_count()
             result = self.dispatch(action, args, origin=decision.get('origin', 'ai'))
+            frontier.discover_report()
+            frontier.run_queue()
             decision['status'] = 'success' if result and not result.get('error') else 'failed'
             if action == 'web_search':
                 if result.get('error'):
@@ -892,6 +951,17 @@ class Investigation:
         if not isinstance(args, dict):
             raise InvalidInput('Tool inputs must be an object.')
         self.origin = 'user'
+        if name == 'resume_queue' and set(args) in (set(), {'id'}):
+            from .frontier import Frontier
+            return Frontier(self).run_queue(recover=True, task_ids={args['id']} if args else None)
+        from .connectors import catalogue
+        if name in {item['id'] for item in catalogue()}:
+            from .frontier import Frontier
+            frontier = Frontier(self)
+            task = frontier.enqueue(name, args, 'Requested from the source tools panel.', explicit=True)
+            if task['state'] not in {'pending', 'queued'}:
+                self.workspace.edit_action(self.case_id, task['id'], state='pending')
+            return frontier.run_queue(task_ids={task['id']})
         if name == 'web_search' and set(args) in ({'query'}, {'query', 'provider'}):
             query = field(args['query'], 'Public search query', 200)
             self.options.update(query=query, context='')
@@ -931,7 +1001,7 @@ class Investigation:
             current = self.report['steps'][self.start_step:]
             failures = sum(step.get('status') == 'failed' for step in current)
             ai_failed = self.report.get('ai', {}).get('status') in {'failed', 'truncated', 'limited'} if self.ai else False
-            shortfall = (self.continuing or 'web_search' in self.options['tools']) and not action and self.page_count() < self.options['page_limit']
+            shortfall = (self.continuing or 'web_search' in self.options['tools'] or bool(self.options['packs'])) and not action and self.page_count() < self.options['page_limit']
             self.report['status'] = ('partial' if failures or ai_failed or shortfall else 'complete') if self.report['source_ids'] else 'failed'
             self.report['stop_reason'] = ('Selected tool finished; prior evidence retained.' if action else 'Selected sources and relevant follow-ups finished.') + (' Some tools were unavailable; edit or retry them below.' if failures or ai_failed else '') + ' Request ceiling is a limit, not a target.'
             if shortfall:
@@ -963,23 +1033,35 @@ def save_report(engine, report):
 
 class Jobs:
     """One owned worker; persisted checkpoints survive restart without resuming traffic."""
-    def __init__(self, engine, enabled=False, ai=None):
+    def __init__(self, engine, enabled=False, ai=None, search_service=None):
         self.engine, self.enabled, self.ai = engine, enabled, ai
+        self.search_service = search_service
+        self.workspace = Workspace(engine)
+        from .owned_process import WorkerLease
+        self.lease = WorkerLease(engine.directory)
         self.lock = threading.RLock()
         self.active = None
         self.states = {}
         self.cancel = threading.Event()
-        for case in engine.cases():
-            report = engine.latest_investigation(case['id'])
-            if report and report.get('status') == 'running':
-                report.update(status='interrupted', stage='Interrupted by app restart', finished_at=now())
-                report.pop('report_id', None)
-                save_report(engine, report)
+        self._worker = None
+        if self.lease.acquire():
+            try:
+                self.workspace.recover_running()
+                for case in engine.cases():
+                    report = engine.latest_investigation(case['id'])
+                    if report and report.get('status') == 'running':
+                        report.update(status='interrupted', stage='Interrupted by app restart', finished_at=now())
+                        report.pop('report_id', None)
+                        save_report(engine, report)
+            finally:
+                self.lease.release()
 
     def start(self, case_id, use_ai=False, options=None, action=None, continuing=False):
         if type(use_ai) is not bool:
             raise InvalidInput('Local AI selection must be true or false.')
-        if action and (not isinstance(action, dict) or set(action) != {'tool', 'arguments'} or action['tool'] not in {'web_search', 'search_subject', 'news_search', 'collect_page', 'domain_signals', 'read_evidence', 'analyze'} or not isinstance(action['arguments'], dict)):
+        from .connectors import catalogue
+        allowed = {'web_search', 'search_subject', 'news_search', 'collect_page', 'domain_signals', 'read_evidence', 'analyze', 'resume_queue'} | {item['id'] for item in catalogue()}
+        if action and (not isinstance(action, dict) or set(action) != {'tool', 'arguments'} or action['tool'] not in allowed or not isinstance(action['arguments'], dict)):
             raise InvalidInput('Unsupported tool or inputs.')
         if action and action['tool'] == 'analyze':
             use_ai = True
@@ -998,22 +1080,37 @@ class Jobs:
                 with self.lock:
                     self.states[run_id] = report
             previous = self.engine.latest_investigation(case_id) if action or continuing else None
-            selected_options = options if options is not None else previous.get('options') if previous else None
-            runner = Investigation(self.engine, case_id, self.enabled, progress, self.cancel, selected_ai, run_id,
-                                   options=selected_options, previous=previous,
-                                   local_only=bool(action and action['tool'] in {'read_evidence', 'analyze'}), continuing=continuing)
+            with self.engine.connection() as db:
+                case = self.engine.require_case(db, case_id)
+            from .frontier import SOURCE_KEYS, default_settings
+            saved = self.workspace.settings(case_id)
+            selected_options = {**(previous.get('options', {}) if previous else {}),
+                **default_settings(case), **{key: saved[key] for key in SOURCE_KEYS if key in saved}, **(options or {})}
+            if not self.lease.acquire():
+                raise InvalidInput('Another app or CLI worker is using this workspace. Stop it before starting collection here.')
+            try:
+                runner = Investigation(self.engine, case_id, self.enabled, progress, self.cancel, selected_ai, run_id,
+                                       options=selected_options, previous=previous,
+                                       local_only=bool(action and action['tool'] in {'read_evidence', 'analyze', 'email_headers', 'resume_queue'}),
+                                       continuing=continuing, search_service=self.search_service)
+            except BaseException:
+                self.lease.release()
+                raise
             runner.publish(persist=True)
             self.active = run_id
             def work():
                 try:
                     runner.run(action)
                 finally:
+                    self.lease.release()
                     with self.lock:
                         self.active = None
             try:
-                threading.Thread(target=work, name='osint-investigation', daemon=True).start()
+                self._worker = threading.Thread(target=work, name='osint-investigation', daemon=True)
+                self._worker.start()
             except BaseException:
                 self.active = None
+                self.lease.release()
                 raise
             while len(self.states) > 50:
                 self.states.pop(next(iter(self.states)))
@@ -1037,3 +1134,7 @@ class Jobs:
 
     def close(self):
         self.cancel.set()
+        if self._worker and self._worker is not threading.current_thread():
+            self._worker.join(timeout=1)
+        if not self._worker or not self._worker.is_alive():
+            self.lease.release()

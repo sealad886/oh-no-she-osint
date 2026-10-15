@@ -2,203 +2,202 @@
 
 ## Intended boundary
 
-This is a **single-user local tool**. It is not a multi-user service, anonymity
-network, hardened remote server, or guarantee of security. The application stores
-potentially sensitive research. Only collect public or authorized information and
-assess evidence before attributing it to a person or organization.
+This is a single-user local investigation tool. Public collection goes online;
+evidence storage, extraction, searching and optional model processing stay local.
+It is not an anonymity network, a remotely deployable multi-user service or an
+identity-verification system. Access to a source does not establish its truth.
 
-## Controls
+## Local application and storage
 
-- Listener binds only `127.0.0.1`; no option permits LAN or internet binding.
-- Canonical launch owns a foreground nginx master and one worker on loopback, forwarding to
-  an ephemeral loopback API listener. Generated config and temporary files live
-  in an owner-only app directory; no shared nginx includes, services, access
-  logs, caches or third-party static routes are used. The actual browser Host
-  and Origin remain subject to the same authenticated API checks.
-- Each process creates a random 256-bit session capability. Launch link carries it
-  in a fragment, exchanged for an HttpOnly, SameSite=Strict session cookie.
-  The UI immediately removes the fragment. Restart invalidates previous sessions.
-- Exact Host/Origin checks and a custom API header block DNS rebinding, cross-origin
-  reads and browser CSRF. Cookies alone are insufficient. No CORS access is granted.
-- Fixed static routes; browser API cannot open arbitrary filesystem paths.
-- Evidence and remote text use DOM text nodes. Content Security Policy blocks
-  inline scripts/styles, external resources, embedded frames and dynamic evaluation.
-  Imported HTML is converted to searchable text and never executed.
-- Parameter-bound SQL, case-scoped reads, foreign keys, transactional imports,
-  concurrent deduplication and consistent export snapshots protect data integrity.
-- POSIX data directories require `700`, database files require `600`. New files
-  are owner-only. Data directory symlinks and symlink/hardlinked databases are refused.
-- Evidence caps: 2 MiB, 10,000 indicator mentions per item. Request bodies cap at
-  3 MiB. API lists cap at 500 indicators / 200 evidence items; exports contain all.
-  Eight request workers maximum, finite client/socket timeouts, no automatic retries.
-- Collection validates all DNS addresses and pins the chosen public IP for the TLS
-  connection with original hostname verification. Private, reserved, multicast,
-  mapped and common IPv6 transition address ranges are refused. At most three
-  redirects are followed; every hop repeats URL validation, public DNS validation,
-  IP pinning and TLS hostname verification. Loops, private destinations and HTTPS
-  downgrades are refused. Proxies, authentication, outgoing cookies and compressed
-  content are unsupported. The final URL remains the evidence source.
-- Collection requires a process-level flag and an explicit user action. Offline
-  mode rejects all collection paths before DNS or connection. Built-in discovery
-  and news search construct query parameters for fixed public providers. Real web
-  search sends approved public queries to selected DuckDuckGo Lite or Bing
-  public HTML endpoints without an API key. Provider failure retires that
-  provider for the run; another selected provider can be tried.
-  Investigation/page tools permit query parameters on selected public URLs;
-  standalone CLI `fetch` rejects them. Queries are outbound data, including those
-  received from links or redirects, and can contain tracking values. URL credentials
-  and fragments remain prohibited.
-- No HTTP access logs, analytics, cloud storage, cloud AI calls, CDN dependencies,
-  or environment TLS key logging. CLI errors suppress private filesystem details.
-- Authenticated per-tab leases authorize runtime lifetime. Final page departure
-  starts a two-second reload grace; missing heartbeats expire after 90 seconds.
-  Unknown page IDs cannot close registered pages. Cleanup cancels app jobs and
-  stops only the owned model/proxy children, closing both API/proxy listeners.
-  Browser close delivery is best effort; lease expiry covers crashes. Persistent
-  evidence is kept, and unfinished checkpoints recover as interrupted at restart.
+- The Python listener binds only `127.0.0.1`. Canonical launch owns foreground
+  nginx master/worker processes and an ephemeral loopback API listener. No shared
+  nginx service/configuration, access logs, caches or third-party routes are used.
+- A random per-launch 256-bit capability travels in the launch URL fragment,
+  exchanges for an HttpOnly SameSite=Strict cookie, and is removed from the URL.
+  Restart invalidates that session. Keep the link and cookie private.
+- Exact Host/Origin checks plus the custom API header constrain browser CSRF,
+  cross-origin reads and DNS rebinding. Cookie possession alone is insufficient.
+  There is no CORS access, arbitrary-file route or configurable remote endpoint.
+- Fixed static assets, DOM text nodes and a restrictive Content Security Policy
+  keep evidence/source HTML inert. Imported HTML is text extraction input, never
+  executable application markup. SQL uses bound parameters and case-scoped reads.
+- POSIX directories require mode `700`, database/backup files `600`. Paths must
+  not be symlinked; linked/non-owned databases are refused. File modes do not
+  encrypt content or provide a Windows ACL guarantee.
+- Original evidence bytes and hashes remain immutable. Changed content creates
+  new evidence. Case/evidence references use foreign keys and transactional writes.
+  Exports use a consistent snapshot and include private case data intentionally.
+- Evidence bodies are capped at 2 MiB; request bodies at 3 MiB. Indicator extraction
+  caps mentions per item. Searchable UI lists are bounded; exports retain originals.
+  These are per-item/request bounds, not a total workspace disk quota.
 
-## Automatic collection and model boundary
+Schema-1 upgrades first create a consistent, integrity-checked private database
+backup, then add schema-2 tables transactionally. Historical reports stay intact;
+imported old tasks are marked historical and cannot silently resume. New data
+includes task/attempt history, source health, candidates, versioned extractions and
+claim references. Rollback requires stopping writers and restoring a retained
+backup into a separate private directory; see [README](README.md#storage-upgrades-and-recovery).
+Migration is not consent to perform collection.
 
-Runs reserve one worker, a default 24-request-unit ceiling and a default
-four-useful-page goal,
-both chosen by the user as positive whole numbers. Fixed product caps are removed;
-values must remain within JavaScript's exact integer range (1 through 2^53−1).
-Runs retain a 300-second soft deadline. A ceiling bounds work; it is not a
-completion target. Failed collection
-attempts consume units but do not fill the useful-page goal. A saved login screen,
-empty JavaScript shell or unrelated page also does not fill the goal. Raw originals
-remain evidence even when they fail the usefulness heuristic. Useful counts refer
-to the current run; retained prior pages remain separately inspectable. Registration
-reserves two units for directory and registry; redirect contacts occur within an
-operation rather than consuming separate units. Returned URLs use the same
-public-address pinning and redirect revalidation as manual collection.
-Checkpoints and final dossiers are local derived evidence with no extracted mentions;
-all originals and reports remain exportable. Restart marks running checkpoints
-interrupted without resuming requests. Activity records tool arguments, origin,
-start/finish time, results or errors and source IDs. Individual retries create a new
-run while retaining earlier report evidence and tool history. Only the selected tool
-runs again; a human can explicitly edit its query, URL, domain or selected signals.
+## External collection boundaries
 
-Real web search saves the original public search response before interpreting it.
-Malformed or challenge pages report failure, not an empty footprint; no challenge
-bypass is attempted. Automatic follow-up requires a full subject-name or alias match
-in a title/snippet. Wikipedia/Wikidata results use the same full-name relevance
-filter, so unrelated name fragments do not drive profile collection. This heuristic
-cannot confirm identity or guarantee relevance. User-entered public context narrows
-queries; stored contact identifiers are not silently appended. A deterministic local
-comparator checks returned public material against known case identifiers and labels
-identifier corroboration, public-context matches, name-only matches and unrelated
-material. These are bounded heuristic signals, not identity confirmation.
-Email-provider domains
-are not researched automatically. Namesake profiles remain separate, unconfirmed
-candidates. Candidate-domain research uses only the first collected profile's
-website claims, with its candidate and evidence IDs attached.
-Structured claims retain rank and qualifiers; temporal values display only fields
-supported by their declared precision, with calendar and uncertainty metadata.
-Deprecated claims and ended website leads cannot drive automatic domain research.
+Core HTTP collection uses one public HTTPS transport. It validates URL syntax,
+port 443 and every resolved address, rejects private/special/mapped/transition
+ranges, pins the chosen numeric public IP, and verifies TLS against the original
+hostname. Up to three redirects repeat those checks. URL credentials, fragments,
+HTTPS downgrades, cookies, authentication, proxy environment variables and ambient
+TLS key logging are unsupported. Requests prefer identity encoding; gzip and
+zlib-wrapped deflate responses are decoded with separate 2 MiB wire and decoded
+limits. Malformed, incomplete, trailing/multiple streams and other encodings are
+rejected. Evidence hashes cover the decoded response entity, not compressed
+wire bytes or TLS traffic. Existing evidence originals are never rewritten.
 
-Optional llama.cpp runs from a local cached GGUF in an owned subprocess. It binds
-127.0.0.1, requires a random API key passed through process environment, disables
-its web UI, downloads, built-in tools and prompt logging, and clears ambient llama
-options, proxy settings and TLS key logging. Browser requests cannot choose a model
-path or endpoint. A trusted startup `--model` flag can choose a different local GGUF.
-The app stops only its owned process. Model responses cap at 1 MiB and prompts at
-128 KiB. The assistant loop caps at four turns and six tool calls; optional local
-relevance comparisons make separate bounded model requests. GPU memory is
-model-dependent, not resource-isolated.
+Built-in API connectors construct requests for fixed providers; website/page
+connectors accept approved public URLs. Selected page tools allow query parameters
+because public source URLs often need them. CLI `fetch` retains its no-query rule.
+Queries and redirect destinations are outbound disclosure: avoid signed/private
+links and tracking values you do not intend to send. DNS resolution uses OS
+resolver behavior and timeout policy.
 
-Continue investigation owns the same single worker and starts only this installed,
-cached local model. Planning responses are strict bounded JSON selecting a public
-search, an eligible untried page, or exhaustion. Saved source IDs, raw bytes and prior
-tool history carry forward; useful pages count cumulatively and collection uses a
-fresh user-selected request ceiling and 300-second soft deadline. Each executed
-collection action consumes that ceiling. Repeated or invalid model choices trigger
-validated engine fallbacks, broadening public context or switching selected
-providers. Unavailable providers are retired for the run. Cancellation, deadline,
-request ceiling or exhaustion of eligible strategies/pages stops recovery, retaining
-evidence. An in-flight model or provider request may finish before a stop takes effect.
+Public collection requires process-level network permission and user-directed
+work. Offline mode rejects provider/page/domain/connector operations before DNS.
+Local email analysis, SQLite retrieval and cached-model processing remain local.
+The optional search-service setup action is separately explicit; it is not part
+of an ordinary offline or missing-service investigation.
 
-Continuation restores only case-approved source URLs, respects selected source
-categories, skips attempted URLs and provider/query pairs, and excludes
-access/login-barrier hosts. The same public query may be tried on another selected
-provider. Editable stage prompts stay local and cannot override dispatcher,
-private-clue, provider, URL or resource checks. Model conclusions remain unverified.
-Visible public `-site:` terms ask the search provider for alternatives; these terms
-are bounded and revalidated against the same public vocabulary and private-clue
-guard. Planner reasons and rejected arguments use the private-output guard.
-Continuation's final draft disables outbound tools in the dispatcher itself, even
-when a model requests a tool that was absent from its offered schemas. Source reading
-remains case-scoped and local. Restart records an interrupted job; collection resumes
-only when the user clicks Continue, never as unsolicited background traffic.
+The trusted source registry declares input kinds, destination families, request
+bounds, provenance/licence and availability. Configuration selects built-in
+implementations; it cannot contain executable Python, shell snippets, arbitrary
+plugins or model-generated commands. Password-reset enumeration, login-required
+scraping, CAPTCHA bypass, brokers and breach aggregation are absent.
 
-Private case identifiers and context are passed only to the owned local model and
-deterministic local comparator. The ephemeral model prompt context is excluded from
-persisted investigation reports and prompt logs. It is not appended to outbound web
-queries and does not enlarge the model's permitted public-query vocabulary. Explicit
-public URL/domain leads remain independently eligible for collection; private
-contact details are not converted into outbound leads. The local model is instructed
-not to repeat raw private identifiers in a draft. A deterministic output guard
-also removes literal clue/contact echoes and formatted phone echoes from model
-drafts, rejected tool activity and timeout traces. This does not detect every
-paraphrase or inferred personal detail; users must inspect drafts before exporting
-or sharing them. The original case
-identifiers remain stored in the private case database and its case exports.
+Automatic public-profile checks require usernames approved in case settings.
+Newly discovered handles never expand that permission. An explicit source action
+approves only its exact inputs; this permission is persisted for resumption.
+Private identifiers remain comparison clues, not automatically generated search
+terms. The dispatcher revalidates private-clue rejection, connector permission,
+public URL scope and current network permission immediately before execution.
+A matching account handle or metadata field never establishes target ownership.
 
-Optional local model comparison adds an unverified context-consistent, unlikely or
-uncertain hint to public leads without including private values in that assessment.
-An unlikely namesake does not count toward the useful-page goal unless a direct
-identifier match corroborates it; collected raw evidence is retained. Model hints
-can be wrong and never establish identity.
+Outcomes distinguish successful observations, valid empty results, blocked access,
+rate limits, uninterpretable responses and errors. Response originals are retained
+where available. Login walls, shells and unrelated pages do not fill useful goals.
+A challenge or failed parser is not represented as evidence of absence.
 
-A central dispatcher permits only case-run evidence IDs and approved URL/domain
-leads. The model's real `web_search` queries must contain the full subject name or
-alias and use only approved public context, approved source domains, nonnumeric
-words observed in returned public titles/snippets, and a bounded keyword vocabulary.
-Private clue echoes and normalized private-clue phrases remain blocked before
-dispatch, even when those words appear publicly, unless the user explicitly placed
-the clue in their public query/context. The model cannot add unrelated tokens, new private contact
-identifiers or arbitrary query text. The query is still observable by the provider.
-`search_subject` and `news_search` return already-collected responses; `collect_page`
-can follow relevant search results or approved links discovered on collected pages.
-New URLs invented by the model, other cases, filesystem tools and shell commands
-are rejected. Selected source controls and process-level network permission constrain
-outbound model tools; offline AI can read saved evidence without web collection.
-Sources are explicitly untrusted
-in prompts. Enforced tool restrictions contain prompt injection even if the model
-ignores those prompts. They do not make model conclusions trustworthy. AI drafts
-remain unverified and citations are filtered against known run evidence IDs.
-The model is directed to search and follow sources; successful evidence reading
-is required before accepting a draft when sources exist. Required tool failures
-mark the draft incomplete. Tool calls, including blocked attempts, are shown in
-activity alongside engine and human calls. Truncated responses
-are visibly incomplete and make the investigation partial; text is retained.
+## Persistent actions, retries and attribution
 
-## Residual limits
+Actions persist their arguments, reason, candidate/source scope, priority and
+attempt receipts. Deduplication preserves quoted phrases, operators and scope;
+it is not broad token-set equivalence. Restart recovers dispatched unfinished
+work as `interrupted_after_dispatch`: a remote read may have completed before the
+local process died. Resume can repeat supported read-only actions. Exactly-once
+external execution is not claimed. Existing evidence and prior attempts remain.
 
-A process running as your OS user can read your evidence, inspect browser/terminal
-state, obtain the launch capability, or tamper with files. File modes do not encrypt
-storage and POSIX modes are not a Windows ACL guarantee. Protect your OS account,
-use disk encryption, avoid shared/cloud-synced folders, and protect browser downloads
-and backups. A copied launch link grants access while that app process is running.
-Local HTTP is not encrypted; do not forward its port, reverse-proxy it, or share it.
+Rate-limit cooldowns/health survive restart. Retry cannot bypass an active cooldown.
+In-flight work can complete before Stop takes effect. Request ceiling, page goal,
+per-request bounds and cancellation remain effective when the user removes the
+soft elapsed-time deadline with page-scoped keep-working mode.
 
-DNS resolution uses OS resolver behavior and timeout policy. Website operators,
-DuckDuckGo, Wikipedia/Wikidata, news services and registries can observe collection
-requests and public IP. Page queries and redirect destinations expand the observable
-request scope. Search results and follow-up links are not a guarantee that a source
-is benign; public pages can redirect to other public sites within the allowed bounds.
-Public data can be stale, incomplete, malicious or misleading. A successful TLS
-handshake authenticates the endpoint certificate, not the truth of its content.
+Candidates are source-backed, unconfirmed hypotheses; matching names do not merge
+them. Observations cite exact start/end spans in immutable versioned text copies,
+with text and original-evidence hashes. Invalid spans and cross-case references
+are rejected. Supporting/contradicting references are separate; contradictory
+references can mark a claim disputed. Generated local reports cannot support
+source observations. Snippets, archive copies and syndicated text do not count
+as independent corroboration merely because they appear multiple times.
 
-There is no unlimited-corpus or denial-of-service guarantee. A malicious same-user
-process can exhaust worker slots, disk space or total case size. Extraction is a
-bounded heuristic; false positives and missed indicators are possible. No model output confirms identity. Aliases and identifiers are user-supplied context; shared sources
-are co-occurrence, not confirmed relationships. No claim of legal compliance or
-independent exhaustive security audit is made.
+A valid span proves the quote matches the saved text; it does not prove the
+predicate, source truth, attribution or semantic entailment of a model's prose.
+Automatic model observations remain unconfirmed. Review the source and its context.
 
-## Reporting
+## Local model boundary
 
-No remote security-report destination is configured yet. Keep sensitive reports
-private and contact the repository owner directly. Do not include evidence,
-credentials, private identifiers or launch links in public issues. Maintainers
-should add a verified private reporting address before publication.
+The optional llama.cpp process uses a cached local GGUF. It binds loopback with a
+random API key, disables its web UI, downloads, built-in tools and prompt logging,
+and clears ambient llama/proxy/TLS-keylog settings. Browser requests cannot select
+an arbitrary model path or endpoint; a trusted launcher `--model` selects a file.
+No model/package download occurs during investigation or model startup. GPU memory
+use depends on the chosen model and is not isolated from other local applications.
+
+Eight bounded prompts guide planning, recovery, action ranking, extraction and
+drafting. Prompt text and public source material cannot expand dispatcher scope.
+Action planning chooses offered existing IDs. Invalid or repeated choices fall
+back to deterministic queue order. Extraction requires exact source passages;
+case-scoped SQLite retrieval supplies relevant local evidence for drafting.
+Assistant calls remain bounded; model output may be truncated or incomplete.
+
+Private case context is supplied only to local comparison. It is not persisted as
+raw model prompt logs, appended to queries, or used to enlarge approved public
+vocabulary. Literal/private-contact output guards reduce echoes in draft and
+blocked-tool activity. They cannot detect all paraphrases or inferred details.
+Case metadata/exports intentionally retain private identifiers. Prompts saved in
+run options can also appear in exports; keep private identifying clues in case
+fields rather than custom instructions.
+
+Model-invented URLs, unrelated queries, other-case evidence, filesystem access,
+shell commands and arbitrary providers are rejected. Local-only final drafting
+disables outbound tools in the dispatcher. Citations are restricted to available
+case evidence, but draft correctness and identity attribution remain unverified.
+
+## Optional SearXNG and Docker boundary
+
+Setup is an explicit app action that can download an official
+`docker.io/searxng/searxng` tag or digest. The resulting immutable image ID is
+recorded and used with pulling disabled during container creation. Ordinary runs
+do not install Docker or silently prepare a missing search service. Docker itself
+is externally managed and is not stopped by app cleanup.
+
+The owned container publishes no host port and mounts no host path or Docker
+socket. Its JSON API binds container-private loopback. The backend uses a fixed
+Docker-exec client with fixed API paths; neither browser nor model can supply
+arbitrary commands, a container identity or a service endpoint. Ownership checks
+compare persisted workspace/launch labels and immutable image identity before
+control. Failed reconciliation retains the ownership receipt rather than acting
+on an unverified container.
+
+The container drops capabilities, disallows privilege escalation and bounds
+memory, CPU and PIDs. Engine configuration selects only Bing, DuckDuckGo and/or
+Brave; outgoing timeouts are bounded and HTTP retries disabled. JSON search
+results retain configured upstream fanout and failures. Fanout is engine count,
+not an exact accounting of remote requests or redirects.
+
+**SearXNG's upstream HTTP transport does not inherit the core collector's DNS/IP
+pinning or redirect checks.** The container still has network access for its
+selected search engines. Docker access is a privileged host capability, and the
+third-party image is an additional trust/dependency boundary. Resource settings
+and a private API do not imply complete network isolation. Direct collection of
+returned pages still uses the core pinned transport.
+
+See [validation status](docs/validation.md) for actual native-container qualification;
+mocked Docker tests do not prove an image starts or real engines return results.
+SearXNG retains its separate [AGPL licence](docs/SOURCE_LICENSES.md#searxng).
+
+## Runtime ownership and departure
+
+Authenticated per-page leases govern owned services. Last-page departure starts a
+two-second reload grace; missing heartbeats expire after 90 seconds. Unknown page
+IDs cannot close registered pages. Cleanup cancels jobs, checkpoints partial work
+and stops only ownership-verified app children/container, including the owned
+model, nginx and metasearch. Multiple pages keep the runtime alive.
+
+A hard parent crash can leave resources temporarily. Persisted ownership receipts
+allow reconciliation on a later startup, subject to OS/Docker reachability and
+identity checks. Browser close delivery is best effort; this is not an OS-level
+process or container watchdog guarantee.
+
+## Residual limits and reporting
+
+A process running as your OS user can read evidence, steal the launch capability
+or tamper with files. Protect your OS account, use disk encryption and private
+backups/download folders. Local HTTP is unencrypted: do not port-forward or expose
+this service through another reverse proxy. Public operators, resolvers, registries
+and metasearch engines can observe requests and your public IP.
+
+Sparse results, rate limits, source changes, parser/model errors and namesakes can
+leave a partial investigation. No unlimited-corpus, denial-of-service, legal-
+compliance, identity-verification or exhaustive security-certification claim is
+made. Hashes and TLS establish limited technical properties, not content truth.
+
+No public security-report destination is configured. Send sensitive findings
+privately to the repository owner. Never place evidence, private identifiers,
+credentials or launch links in public issues.

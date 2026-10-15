@@ -1,5 +1,102 @@
 # Validation evidence
 
+
+## Source-driven workspace delivery — 2026-10-15
+
+Status: implementation and local qualification complete for the core workspace.
+Native optional SearXNG startup remains unqualified because the installed Docker
+client cannot connect to its daemon. All receipts below the historical divider
+apply only to their dated older snapshots.
+
+The current acceptance scope covers:
+
+- In-place schema-1 to schema-2 migration with a consistent private backup,
+  rollback fixture and preservation of existing case fields/evidence originals.
+- Durable source actions, attempts, cooldowns and unknown dispatched outcomes;
+  retry/skip/priority controls and explicitly requested resume.
+- Separate candidates and exact, versioned supporting/contradicting passages;
+  snippets and readable pages do not become verified identity claims.
+- Local retrieval of relevant later evidence, bounded local AI action selection
+  and exact-passage extraction, with eight configurable prompts.
+- Public/private input separation, offline rejection, permitted connector scope,
+  safe text rendering and explicit single-source configuration.
+- Website sources, Crossref, GitHub/GitLab public profiles, Wayback, public places,
+  local email-header processing and optional owned SearXNG.
+- Page departure, multiple tabs/reload grace, persistent owned-process receipts
+  and interruption recovery without discarding cases or evidence.
+
+| Evidence layer | Observed result |
+| --- | --- |
+| Python behavioral/integration suite | `.venv/bin/python -m unittest discover -s tests -q`: **295 passed in 24.821 seconds**, no failures/skips, outside the sandbox for loopback/process checks |
+| Node UI controller tests | `node --test tests/test_workspace_ui.cjs`: **10 passed**, including source settings, named email selection, stale-case protection, queue controls, eight prompts and candidate-filtered relationships |
+| Syntax/static/document checks | Python compilation, JavaScript syntax, launcher shell syntax, whitespace and existing local Markdown links passed; AST-only Graphify refresh completed |
+| Schema-1 fixture migration/rollback | Suite verifies private consistent backup, transactional rollback, conservative historical import, running-to-success checkpoint reconciliation and immutable evidence |
+| Existing user cases/evidence preservation | Actual upgrade to schema 2: **3 cases, 513 originals, 4,678 indicators and 35,832 mentions** unchanged. Complete original-table fingerprints match the pre-upgrade backup, every raw SHA-256 verifies, SQLite integrity is `ok` |
+| Browser workflow | Actual authenticated app/nginx with controlled public responses: save public settings → run website discovery → resume follow-up → inspect candidate/exact passage/relationships → retry with two retained attempts → refresh → select saved email by title and analyze locally. No browser warnings/errors observed; all 14 fixture originals verify |
+| Core live providers | Five successful public integrations: GitHub API (`octocat`), website discovery (`www.python.org`), Crossref, Wayback and GeoNames. GitLab returned an HTTP-200 access barrier and was correctly blocked. All six returned originals retained and hashes verified |
+| Native local model | Installed llama.cpp and cached REDCELL I-Compact: valid offered-action selection, **two exact-passage observations**, retrieval of the relevant 36th source, one successful local evidence read and a draft citing one saved source. No literal synthetic private canary in output; owned listener closed afterward |
+| Owned-process lifecycle | Native suite covers parent death, exclusive worker ownership, nginx routing/master-worker cleanup and page lease behavior. Closing the actual fixture tab eventually stopped its app/proxy and closed the listener; teardown receipt retained all 14 originals, six mocked public requests and zero canary disclosures |
+| Native SearXNG container | **Not qualified**: `docker info` outside the sandbox confirmed the daemon was unavailable. No image pull or container startup was attempted; mocked ownership/setup/cancellation/fanout contracts passed |
+| Independent review | All material findings repaired and re-reviewed: encoded/private URL egress, pack-only false completion, retry isolation, historical checkpoint outcomes, bounded AI JSON, citation enforcement and decompression bounds. No material issue remaining in that bounded scope |
+
+The browser's public transports used synthetic responses; that journey proves app
+integration, not provider availability. Separate live checks used only the public
+test targets named above, never private case details. A first live website attempt
+exposed a server sending gzip despite the identity preference. The shared collector
+now decodes gzip/zlib-wrapped deflate with separate 2 MiB wire/decoded bounds; the
+same real website then returned 40 same-host leads. Its decoded entity bytes are
+the preserved evidence original. Truncation, bombs, checksum failures, trailing
+streams and unsupported encodings have behavioral regression coverage.
+
+Native AI qualification initially exposed fenced structured JSON and an uncited
+draft. Complete JSON fences now pass the same strict schema/span checks; truncated
+responses remain rejected. A draft without a known saved-source citation is marked
+failed even after a successful read. The final native run selected an offered
+source, saved two literal observations and produced a cited draft. Another actual
+browser model run searched, collected and read evidence before producing a draft
+with three retained source citations. Model assertions remain unverified; these
+receipts do not establish factual correctness or the identity of any real subject.
+
+Before upgrade, a separate private consistent backup was retained at
+`.local-osint/backups/before-source-engine-20261015.sqlite3`; the migrator also made
+its own schema-1 backup. No old case field, original byte, indicator or mention was
+changed. The canonical app was reopened against the preserved workspace and the
+new source settings/workspace controls loaded successfully. No investigation of a
+real saved subject was started as part of qualification.
+
+Environment: macOS, Python 3.14.8, nginx 1.31.6 and the installed native llama.cpp.
+Other Python versions, Windows, other GGUF families and native SearXNG remain
+unqualified. The suite emits existing SQLite fixture `ResourceWarning` messages
+about unclosed test connections; they did not fail checks and are not evidence of
+production connection leaks. Browser close delivery remains best effort: normal
+close uses a two-second reload grace; missed departure signals expire under the
+90-second heartbeat lease. Stop/checkpoint cannot interrupt every in-flight network
+or model request immediately.
+
+Optional SearXNG code configures an official image, pins immutable identity,
+uses a container-private loopback API through a fixed Docker-exec client, and
+reports selected-engine fanout/failures. Mocked Docker fixtures can establish
+command/ownership contracts; they cannot establish native image startup, resource
+compatibility or engine reliability. The app does not start or install an
+externally managed Docker daemon as part of investigation. Core collection
+remains available without this optional service.
+
+SearXNG upstream HTTP is a distinct transport: it does not inherit core DNS/IP
+pinning and redirect controls. This limitation must remain explicit even after a
+future container smoke test passes. Configured engine count is fanout disclosure,
+not an exact upstream request count.
+
+No publication, deployment, remote CI or release is implied by implementation or
+local checks. Unmet qualification remains explicit above; local test success does not imply
+user acceptance or exhaustive security certification.
+
+## Historical validation receipts — 2026-10-09 to 2026-10-10
+
+The following material is retained as historical evidence for specific earlier
+snapshots. Their fixed deadlines, six-prompt counts, schema statements and tool
+scope describe those snapshots only. Current behavior is documented in
+[README](../README.md), [design](design.md) and [security](../SECURITY.md).
+
 ## Continue investigation planner — 2026-10-10
 
 The repaired feature passed **153 tests in 6.763 seconds**, independently repeated

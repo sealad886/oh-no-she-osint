@@ -8,6 +8,7 @@ import ipaddress
 import socket
 import ssl
 import time
+import zlib
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, quote, urlencode, urljoin, urlsplit, urlunsplit
 
@@ -110,6 +111,19 @@ def collect(engine, case_id, url, enabled=False, allow_query=False):
 
 
 def fetch_public(url, allow_query=False):
+    return _fetch_public(url, allow_query)
+
+
+def fetch_public_response(url, allow_query=False, allowed_hosts=None):
+    """Collect bounded response bytes and HTTP outcome for trusted connectors.
+
+    Unlike ordinary page collection, failure bodies are evidence too. DNS,
+    destination pinning, redirect checks and body limits remain identical.
+    """
+    return _fetch_public(url, allow_query, structured=True, allowed_hosts=allowed_hosts)
+
+
+def _fetch_public(url, allow_query=False, structured=False, allowed_hosts=None):
     """Fetch a bounded public response, revalidating and pinning every redirect."""
     deadline = time.monotonic() + 20
     visited = set()
@@ -117,6 +131,8 @@ def fetch_public(url, allow_query=False):
     for hop in range(4):
         if time.monotonic() >= deadline:
             raise InvalidInput("Collection timed out.")
+        if allowed_hosts is not None and public_url(current, allow_query=allow_query)[0] not in allowed_hosts:
+            raise InvalidInput("Source redirected outside its declared destination hosts.")
         host, address, path, canonical = target(current, allow_query=allow_query)
         if canonical in visited:
             raise InvalidInput("Destination returned a redirect loop.")
@@ -136,6 +152,12 @@ def fetch_public(url, allow_query=False):
                     raise InvalidInput("Destination returned an invalid redirect URL.")
                 current = urljoin(canonical, location)
                 continue
+            if structured:
+                raw, format, canonical = read_public_response(response, connection, canonical, deadline, permit_status=True, permit_xml=True)
+                retry_after = response.getheader('Retry-After', '')
+                retry_after = min(int(retry_after), 86400) if str(retry_after).isdecimal() else None
+                return {"raw": raw, "format": format, "canonical": canonical,
+                        "status": response.status, "retry_after": retry_after, "requests": hop + 1}
             return read_public_response(response, connection, canonical, deadline)
         except (OSError, http.client.HTTPException) as exc:
             # Do not echo URLs, cookies, TLS internals, or server-controlled error data.
@@ -144,36 +166,56 @@ def fetch_public(url, allow_query=False):
             connection.close()
 
 
-def read_public_response(response, connection, canonical, deadline):
+def read_public_response(response, connection, canonical, deadline, permit_status=False, permit_xml=False):
     try:
-        if response.status == 429:
+        if response.status == 429 and not permit_status:
             raise InvalidInput('Source rate limited this request (HTTP 429). Try a later investigation.')
-        if response.status != 200:
+        if response.status != 200 and not permit_status:
             raise InvalidInput(f"Destination returned HTTP {response.status}.")
-        if response.getheader("Content-Encoding", "identity").lower() != "identity":
-            raise InvalidInput("Compressed responses are unsupported.")
+        encoding = response.getheader("Content-Encoding", "identity").strip().lower()
+        if encoding not in {"identity", "gzip", "deflate"}:
+            raise InvalidInput("Only identity, gzip and deflate response encodings are supported.")
+        decoder = zlib.decompressobj(16 + zlib.MAX_WBITS if encoding == "gzip" else zlib.MAX_WBITS) if encoding != "identity" else None
         mime = response.getheader("Content-Type", "").split(";", 1)[0].strip().lower()
         formats = {"text/html": "html", "text/plain": "text", "application/json": "json", "application/rdap+json": "json", "text/csv": "csv"}
+        if permit_xml:
+            formats.update({"application/xml": "text", "text/xml": "text", "application/rss+xml": "text", "application/atom+xml": "text"})
+        if permit_status and not mime:
+            formats[""] = "text"
         if mime not in formats:
             raise InvalidInput("Only UTF-8 HTML, text, JSON and CSV responses are supported.")
         length = response.getheader("Content-Length")
         if length and (not length.isdecimal() or int(length) > MAX_BYTES):
             raise InvalidInput("Response exceeds the 2 MiB evidence limit.")
-        chunks, size = [], 0
+        chunks, size, wire_size = [], 0, 0
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise InvalidInput("Collection timed out.")
             if connection.sock:
                 connection.sock.settimeout(min(10, remaining))
-            chunk = response.read1(min(65536, MAX_BYTES + 1 - size))
+            chunk = response.read1(min(65536, MAX_BYTES + 1 - wire_size))
             if not chunk:
                 break
+            wire_size += len(chunk)
+            if wire_size > MAX_BYTES:
+                raise InvalidInput("Response exceeds the 2 MiB wire limit.")
+            if decoder is not None:
+                # max_length bounds allocation even for a highly compressed body.
+                # Do not call flush(): its length is only an initial buffer size,
+                # not an upper bound on decoded output.
+                chunk = decoder.decompress(chunk, MAX_BYTES + 1 - size)
+                if decoder.unused_data:
+                    raise InvalidInput("Compressed response has trailing data or multiple streams.")
             chunks.append(chunk)
             size += len(chunk)
             if size > MAX_BYTES:
                 raise InvalidInput("Response exceeds the 2 MiB evidence limit.")
+        if decoder is not None and (not decoder.eof or decoder.unused_data or decoder.unconsumed_tail):
+            raise InvalidInput("Compressed response is incomplete or contains trailing data.")
         return b"".join(chunks), formats[mime], canonical
+    except zlib.error as exc:
+        raise InvalidInput("Compressed response is malformed or failed its integrity check.") from exc
     except (OSError, http.client.HTTPException) as exc:
         # Do not echo URLs, cookies, TLS internals, or server-controlled error data.
         raise InvalidInput("HTTPS collection failed. Check connectivity and the site's certificate.") from exc

@@ -2,7 +2,7 @@
 const $ = id => document.getElementById(id);
 let currentCase = '', currentSubject = '', optionsCase = '', status = {}, requestVersion = 0, aiReady = false;
 let promptDefaults = {}, searchProviders = [];
-const promptLabels = {plan: 'Plan the next useful action', repetition: 'Recover from repeated or stalled actions', provider_failure: 'Recover from search-provider failure', no_useful_pages: 'Recover when pages are not useful', identity_ambiguity: 'Handle uncertain identity matches', draft: 'Write the final sourced draft'};
+const promptLabels = {plan: 'Plan the next useful action', repetition: 'Recover from repeated or stalled actions', provider_failure: 'Recover from search-provider failure', no_useful_pages: 'Recover when pages are not useful', identity_ambiguity: 'Handle uncertain identity matches', draft: 'Write the final sourced draft', action: 'Choose the next queued action', extract: 'Extract observations with exact supporting passages'};
 
 function node(tag, text, className) {
   const element = document.createElement(tag);
@@ -116,6 +116,7 @@ async function refresh() {
   if (!data.evidence.length) $('sources').append(node('p', 'No matching evidence. Add a source or adjust your search.', 'empty-results'));
   if (data.entities.length === data.limits.entities) $('indicators').append(node('p', 'Showing up to 500 indicators. Narrow your search; exports include all results.', 'small'));
   await refreshRun(caseId, loadOptions);
+  await refreshResearch(caseId, loadOptions);
   if (data.evidence.length === data.limits.evidence) $('sources').append(node('p', 'Showing up to 200 sources. Narrow your search; exports include all results.', 'small'));
 }
 function detail(title) {
@@ -213,6 +214,7 @@ for (const [index, id] of ['indicators-tab', 'sources-tab'].entries()) $(id).add
     $('start-notice').hidden = !status.network;
     $('run-investigation').disabled = !status.network;
     await loadPromptSettings();
+    await loadConnectors();
     await refreshAI();
     $('workspace').hidden = false;
     await loadCases();
@@ -282,11 +284,13 @@ function updateRunControls() {
   if ($('tool-dialog').open) updateToolSubmit();
 }
 async function startInvestigation(caseId) {
+  await saveSourceSettings(caseId);
   notice('Investigation started. Sources and progress appear below.');
   const report = await api('/api/investigate', {case: caseId, ai: $('use-ai').checked, options: getOptions()});
   if (currentCase === caseId) renderRun(report, caseId);
 }
 async function continueInvestigation(caseId) {
+  await saveSourceSettings(caseId);
   notice('Continuing from saved evidence. Local AI will plan the next useful sources.');
   const report = await api('/api/continue', {case: caseId, options: getOptions()});
   if (currentCase === caseId) renderRun(report, caseId);
@@ -617,3 +621,310 @@ action($('stop-investigation'), async () => {
 });
 action($('start-ai'), async () => { await api('/api/ai/start', {}); await refreshAI(); });
 action($('stop-ai'), async () => { await api('/api/ai/stop', {}); await refreshAI(); });
+
+let connectors = [], researchTimer, researchCase = '', connectorCase = '', selectedConnector = null;
+let researchLoading = false, sourceSettingsDirty = false, researchSignature = '', searchServiceLoaded = false, relationshipWorkspace = null, connectorOpenVersion = 0;
+const connectorFallbackFields = {
+  crossref: ['query'], github_public: ['username'], public_profile: ['username', 'site'],
+  website_sources: ['url'], wayback: ['url'], email_headers: ['evidence_id'],
+  public_place: ['query'], searxng: ['query']
+};
+const sourceFieldLabels = {query: 'Approved public query', username: 'Approved public username', site: 'Public profile site', url: 'Public HTTPS URL', evidence_id: 'Saved evidence ID'};
+function connectorReady(connector) {
+  if (typeof connector.availability === 'boolean') return connector.availability;
+  return connector.available !== false && connector.availability?.ready !== false && connector.ready !== false;
+}
+function connectorReason(connector) {
+  return connector.availability?.reason || connector.availability_message || connector.reason || '';
+}
+function connectorOnline(connector) { return connector.network !== undefined ? connector.network !== false : (connector.outbound_fields || connector.domains || ['public']).length > 0; }
+function connectorFields(connector) {
+  const fields = connector.inputs || connector.input_kinds || connectorFallbackFields[connector.id] || ['query'];
+  return (Array.isArray(fields) ? fields : Object.entries(fields).map(([name, field]) => typeof field === 'object' ? {name, ...field} : {name, type: field})).map(field => typeof field === 'string' ? {name: field} : {...field, name: field.name || field.id});
+}
+function lineValues(id) { return $(id).value.split('\n').map(value => value.trim()).filter(Boolean); }
+function sourceSettings() {
+  if (!$('keep-working').checked && (!$('runtime-seconds').reportValidity() || !Number.isSafeInteger(Number($('runtime-seconds').value)))) throw new Error('Use a positive whole number for collection time.');
+  return {packs: [...document.querySelectorAll('[name="source-pack"]:checked')].map(input => input.value), public_usernames: lineValues('public-usernames'), seed_urls: lineValues('seed-urls'), runtime_seconds: $('keep-working').checked ? 0 : Number($('runtime-seconds').value), keep_working: $('keep-working').checked};
+}
+function setSourceSettings(settings = {}) {
+  for (const input of document.querySelectorAll('[name="source-pack"]')) input.checked = (settings.packs || []).includes(input.value);
+  $('public-usernames').value = (settings.public_usernames || []).join('\n');
+  $('seed-urls').value = (settings.seed_urls || []).join('\n');
+  $('runtime-seconds').value = settings.runtime_seconds > 0 ? settings.runtime_seconds : 300;
+  $('keep-working').checked = settings.keep_working === true;
+  $('runtime-seconds').disabled = $('keep-working').checked;
+  sourceSettingsDirty = false;
+}
+async function saveSourceSettings(caseId = currentCase) {
+  if (!caseId || caseId !== currentCase) throw new Error('Select a case first.');
+  await api('/api/workspace/settings', {case: caseId, settings: sourceSettings()});
+  if (currentCase === caseId) sourceSettingsDirty = false;
+}
+async function loadConnectors() {
+  const result = await api('/api/connectors');
+  connectors = result.connectors || [];
+  const selectedPacks = [...document.querySelectorAll('[name="source-pack"]:checked')].map(input => input.value);
+  const hadPackOptions = $('source-packs').childElementCount > 0;
+  const packs = $('source-packs'); packs.replaceChildren();
+  const catalogue = $('connector-catalogue'); catalogue.replaceChildren();
+  for (const connector of connectors) {
+    const enabled = connectorReady(connector), online = connectorOnline(connector);
+    const label = node('label'), input = node('input'); input.type = 'checkbox'; input.name = 'source-pack'; input.value = connector.id;
+    input.checked = hadPackOptions && selectedPacks.includes(connector.id);
+    label.append(input, node('span', connector.label + (!enabled ? ' · unavailable' : ''))); packs.append(label);
+    const card = node('article', undefined, 'tool-step connector-card');
+    const heading = node('div', undefined, 'step-heading'); heading.append(node('h4', connector.label), node('span', enabled ? online ? 'PUBLIC SOURCE' : 'LOCAL TOOL' : 'UNAVAILABLE', 'step-status')); card.append(heading);
+    card.append(node('p', connector.description || '', 'small'));
+    const targets = connector.targets || connector.target_types;
+    if (targets?.length) card.append(node('p', 'Targets: ' + targets.join(', '), 'small muted'));
+    if (connector.domains?.length) card.append(node('p', 'Destinations: ' + connector.domains.join(', '), 'small muted'));
+    if (connector.license) card.append(node('p', 'Licence: ' + connector.license, 'small muted'));
+    if (connectorReason(connector)) card.append(node('p', connectorReason(connector), enabled ? 'small' : 'step-error'));
+    const run = node('button', 'Configure & run', 'secondary'); run.type = 'button'; run.dataset.connector = connector.id;
+    run.disabled = !enabled || online && !status.network;
+    action(run, () => openConnector(connector)); card.append(run); catalogue.append(card);
+  }
+  if (!connectors.length) catalogue.append(node('p', 'No source tools are installed.', 'small'));
+  renderSearchService(result.search_service || {});
+}
+function renderSearchService(service) {
+  const state = service.state || 'stopped';
+  $('search-service-status').textContent = 'Local metasearch: ' + state + (service.error || service.reason || service.message ? ' · ' + (service.error || service.reason || service.message) : '') + (service.upstream_fanout ? ` · up to ${service.upstream_fanout} external engines per search` : '');
+  if (!searchServiceLoaded) {
+    $('search-service-image').value = service.image || '';
+    if (service.engines) for (const input of document.querySelectorAll('[name="metasearch-engine"]')) input.checked = service.engines.includes(input.value);
+    searchServiceLoaded = true;
+  }
+  $('start-search-service').disabled = ['ready', 'running', 'loading', 'starting'].includes(state);
+  $('stop-search-service').hidden = !['ready', 'running', 'loading', 'starting'].includes(state);
+}
+function researchAction(area, label, callback) {
+  const button = node('button', label, 'secondary'); button.type = 'button'; action(button, callback); area.append(button); return button;
+}
+function renderResearch(workspace, caseId) {
+  const tasks = workspace.tasks || [], counts = workspace.counts || {};
+  const pending = tasks.filter(task => ['pending', 'planned', 'queued', 'running', 'cooldown', 'interrupted', 'interrupted_after_dispatch', 'blocked'].includes(task.state || task.status));
+  const running = tasks.filter(task => (task.state || task.status) === 'running').length;
+  $('workspace-progress').textContent = `${tasks.length} saved actions · ${pending.length} awaiting work · ${running} running`;
+  $('resume-workspace').disabled = !pending.length || running > 0 || displayedRun?.status === 'running';
+  const metrics = $('research-counts'); metrics.replaceChildren();
+  for (const [key, label] of [['leads', 'discovery leads'], ['readable_documents', 'readable documents'], ['corroborated_claims', 'corroborated claims']]) {
+    const metric = node('div'); metric.append(node('strong', String(counts[key] || 0)), node('span', label)); metrics.append(metric);
+  }
+  const expandedAttempts = new Set([...document.querySelectorAll('[data-task-attempts]')].filter(details => details.open).map(details => details.dataset.taskAttempts));
+  const queue = $('research-tasks'), queueScroll = queue.scrollTop; queue.replaceChildren();
+  if (!tasks.length) queue.append(node('p', 'No queued actions yet. Run an investigation or configure a source above.', 'small muted'));
+  for (const task of tasks) {
+    const state = task.state || task.status || 'planned', card = node('article', undefined, 'tool-step queue-task');
+    const heading = node('div', undefined, 'step-heading');
+    heading.append(node('h4', connectors.find(connector => connector.id === task.connector)?.label || task.connector || 'Research action'), node('span', state.replaceAll('_', ' '), 'step-status')); card.append(heading);
+    if (task.reason) card.append(node('p', task.reason, 'small'));
+    card.append(argumentList(task.arguments));
+    const attempts = Array.isArray(task.attempts) ? task.attempts.length : task.attempts || 0;
+    const retryAt = task.not_before || task.retry_at;
+    card.append(node('p', `Priority ${task.priority ?? 0} · ${attempts} attempts` + (retryAt ? ' · eligible after ' + new Date(retryAt).toLocaleString() : ''), 'small muted'));
+    if (task.error) card.append(node('p', String(task.error), 'step-error'));
+    if (task.result) card.append(node('p', typeof task.result === 'string' ? task.result : task.result.summary || task.result.status || 'Result saved with this action.', 'small'));
+    const sources = [...new Set([...(task.evidence_ids || []), ...(task.result?.evidence_ids || [])])];
+    for (const id of sources) sourceLink(card, caseId, id, 'Action evidence');
+    const history = task.attempt_history || (Array.isArray(task.attempts) ? task.attempts : []);
+    if (history.length) {
+      const details = node('details'); details.dataset.taskAttempts = task.id; details.open = expandedAttempts.has(task.id); details.append(node('summary', 'Inspect previous attempts'));
+      for (const attempt of history) {
+        const item = node('div', undefined, 'attempt-entry');
+        item.append(node('p', [attempt.state || attempt.status, attempt.started_at, attempt.finished_at ? 'finished ' + attempt.finished_at : ''].filter(Boolean).join(' · '), 'small'));
+        if (attempt.error) item.append(node('p', attempt.error, 'step-error'));
+        if (attempt.result) item.append(node('pre', typeof attempt.result === 'string' ? attempt.result : JSON.stringify(attempt.result, null, 2), 'evidence-text'));
+        details.append(item);
+      }
+      card.append(details);
+    }
+    const controls = node('div', undefined, 'tool-actions');
+    const changeTask = async (operation, extra = {}) => {
+      await api('/api/task', {case: caseId, id: task.id, operation, ...extra}); await refreshResearch(caseId);
+    };
+    if (state !== 'running') {
+      researchAction(controls, 'Retry', () => changeTask('retry'));
+      const connector = connectors.find(item => item.id === task.connector);
+      if (connector) researchAction(controls, 'Edit & run', () => openConnector(connector, task.arguments || {}));
+      if (!['finished', 'complete', 'completed', 'success', 'skipped'].includes(state)) researchAction(controls, 'Skip', () => changeTask('skip'));
+      researchAction(controls, 'Prioritize', () => changeTask('priority', {priority: Number(task.priority || 0) + 10}));
+    }
+    card.append(controls); queue.append(card);
+  }
+  queue.scrollTop = queueScroll;
+  const candidates = $('research-candidates'); candidates.replaceChildren();
+  for (const candidate of workspace.candidates || []) {
+    const card = node('article', undefined, 'tool-step'); card.append(node('p', 'CANDIDATE · ' + (candidate.status || 'UNVERIFIED'), 'eyebrow'), node('h3', candidate.label || candidate.name || candidate.id));
+    if (candidate.context) card.append(node('p', typeof candidate.context === 'string' ? candidate.context : JSON.stringify(candidate.context), 'small'));
+    for (const id of [...new Set([...(candidate.evidence_ids || []), candidate.source_id].filter(Boolean))]) sourceLink(card, caseId, id, 'Candidate evidence');
+    candidates.append(card);
+  }
+  if (!workspace.candidates?.length) candidates.append(node('p', 'No candidate identities derived yet.', 'small muted'));
+  const claims = $('research-claims'); claims.replaceChildren();
+  for (const claim of workspace.claims || []) {
+    const card = node('article', undefined, 'tool-step claim-card');
+    const candidate = workspace.candidates?.find(item => item.id === claim.candidate_id);
+    card.append(node('p', [candidate?.label || claim.candidate_id, claim.status || 'unverified'].filter(Boolean).join(' · '), 'eyebrow'), node('h4', [claim.predicate, typeof claim.value === 'string' ? claim.value : JSON.stringify(claim.value)].filter(Boolean).join(': ')));
+    if (claim.quote) card.append(node('blockquote', claim.quote, 'source-quote'));
+    for (const reference of claim.references || claim.refs || []) {
+      card.append(node('blockquote', reference.quote || '', 'source-quote'), node('p', [reference.relation || 'support', reference.extractor_version || '', reference.extraction_id ? 'Extraction ' + reference.extraction_id : '', Number.isInteger(reference.start) ? `characters ${reference.start}–${reference.end}` : ''].filter(Boolean).join(' · '), 'small muted'));
+      sourceLink(card, caseId, reference.evidence_id, 'Inspect cited evidence');
+    }
+    if (claim.extraction_version || claim.start !== undefined) card.append(node('p', ['Extraction ' + (claim.extraction_version || 'saved'), claim.start !== undefined ? `characters ${claim.start}–${claim.end}` : ''].filter(Boolean).join(' · '), 'small muted'));
+    sourceLink(card, caseId, claim.evidence_id || claim.source_id, 'Inspect supporting passage'); claims.append(card);
+  }
+  if (!workspace.claims?.length) claims.append(node('p', 'No sourced observations yet. Search snippets remain discovery leads.', 'small muted'));
+  relationshipWorkspace = {workspace, caseId};
+  const candidateFilter = $('relationship-candidate'), previousFilter = candidateFilter.value;
+  const allCandidates = node('option', 'All candidates'); allCandidates.value = ''; candidateFilter.replaceChildren(allCandidates);
+  for (const candidate of workspace.candidates || []) {
+    const option = node('option', candidate.label || candidate.id); option.value = candidate.id; candidateFilter.append(option);
+  }
+  candidateFilter.value = (workspace.candidates || []).some(candidate => candidate.id === previousFilter) ? previousFilter : '';
+  renderRelationships(workspace, caseId);
+}
+function renderRelationships(workspace, caseId) {
+  const selected = $('relationship-candidate').value;
+  const claims = (workspace.claims || []).filter(claim => !selected || claim.candidate_id === selected);
+  const edges = claims.flatMap(claim => (claim.references || claim.refs || []).map(reference => ({claim, reference})));
+  const area = $('evidence-relationships'); area.replaceChildren();
+  if (!edges.length) area.append(node('p', 'No source-linked relationships for this selection yet.', 'small muted'));
+  else {
+    const table = node('table', undefined, 'relationship-table');
+    table.append(node('caption', 'Candidate → observation → original evidence. These links describe source provenance, not confirmed identity or ownership.'));
+    const head = node('thead'), heading = node('tr');
+    for (const label of ['Candidate', 'Observation', 'Evidence relationship', 'Original evidence']) { const cell = node('th', label); cell.scope = 'col'; heading.append(cell); }
+    head.append(heading); table.append(head);
+    const body = node('tbody');
+    for (const {claim, reference} of edges.slice(0, 80)) {
+      const row = node('tr'), candidate = workspace.candidates?.find(item => item.id === claim.candidate_id);
+      row.append(node('td', candidate?.label || 'Unassigned candidate'), node('td', [claim.predicate, claim.value, '(' + (claim.status || 'unconfirmed') + ')'].filter(Boolean).join(' · ')), node('td', reference.relation === 'contradict' ? 'Contradicts observation' : 'Supports observation'));
+      const evidence = node('td');
+      if (reference.quote) evidence.append(node('blockquote', reference.quote, 'source-quote'));
+      if (reference.evidence_id) researchAction(evidence, 'Inspect original evidence', () => showEvidence(caseId, reference.evidence_id));
+      row.append(evidence); body.append(row);
+    }
+    table.append(body); area.append(table);
+    if (edges.length > 80) area.append(node('p', `Showing 80 of ${edges.length} evidence relationships. Select a candidate to narrow the view; exports retain all references.`, 'small muted'));
+  }
+  const timeline = $('observation-timeline'); timeline.replaceChildren();
+  const ordered = [...claims].sort((left, right) => String(left.created_at || '').localeCompare(String(right.created_at || '')) || String(left.id).localeCompare(String(right.id)));
+  if (!ordered.length) { timeline.append(node('p', 'No recorded observations for this selection.', 'small muted')); return; }
+  const list = node('ol', undefined, 'observation-timeline');
+  for (const claim of ordered.slice(-80)) {
+    const item = node('li'), candidate = workspace.candidates?.find(value => value.id === claim.candidate_id);
+    const time = node('time', claim.created_at ? new Date(claim.created_at).toLocaleString() : 'Recorded time unavailable');
+    if (claim.created_at) time.dateTime = claim.created_at;
+    item.append(time, node('p', [candidate?.label || 'Unassigned candidate', claim.predicate, claim.value, claim.status || 'unconfirmed'].filter(Boolean).join(' · ')));
+    for (const reference of (claim.references || claim.refs || []).slice(0, 4)) if (reference.evidence_id) researchAction(item, reference.relation === 'contradict' ? 'Contradicting evidence' : 'Supporting evidence', () => showEvidence(caseId, reference.evidence_id));
+    list.append(item);
+  }
+  timeline.append(list);
+  if (ordered.length > 80) timeline.append(node('p', `Showing the latest 80 of ${ordered.length} recorded observations. Select a candidate to narrow the view; exports retain all observations.`, 'small muted'));
+}
+async function refreshResearch(caseId = currentCase, loadSettings = false) {
+  clearTimeout(researchTimer);
+  if (!caseId || currentCase !== caseId) return;
+  if (researchLoading) { researchTimer = setTimeout(() => refreshResearch(currentCase).catch(error => notice(error.message)), 1500); return; }
+  researchLoading = true;
+  let refreshEvidence = false;
+  try {
+    const workspace = await api('/api/workspace?' + new URLSearchParams({case: caseId}));
+    if (currentCase !== caseId) return;
+    const signature = JSON.stringify((workspace.tasks || []).map(task => [task.id, task.state || task.status, task.attempts, task.updated_at]));
+    refreshEvidence = researchCase === caseId && researchSignature !== signature && !!researchSignature;
+    researchSignature = signature;
+    if (loadSettings || researchCase !== caseId) { setSourceSettings(workspace.settings || {}); researchCase = caseId; }
+    renderResearch(workspace, caseId);
+    if (workspace.search_service) renderSearchService(workspace.search_service);
+  } finally {
+    researchLoading = false;
+    if (!pageLeaving && currentCase) researchTimer = setTimeout(() => refreshResearch(currentCase).catch(error => notice(error.message)), 2500);
+  }
+  if (refreshEvidence && currentCase === caseId) await refresh();
+}
+async function openConnector(connector, args = {}) {
+  if (!currentCase) return;
+  const caseId = currentCase, openVersion = ++connectorOpenVersion;
+  selectedConnector = connector; connectorCase = currentCase;
+  $('connector-dialog-title').textContent = connector.label;
+  $('connector-description').textContent = connector.description || '';
+  const fields = $('connector-fields'); fields.replaceChildren();
+  let savedEvidenceSelect;
+  for (const field of connectorFields(connector)) {
+    if (!field.name) continue;
+    const savedEmail = connector.id === 'email_headers' && field.name === 'evidence_id';
+    const label = node('label', savedEmail ? 'Saved email or header evidence' : field.label || sourceFieldLabels[field.name] || field.name); label.htmlFor = 'connector-' + field.name;
+    const options = field.options || (field.name === 'site' ? connector.sites : null);
+    const input = node(options || savedEmail ? 'select' : 'input'); input.id = label.htmlFor; input.dataset.connectorField = field.name;
+    if (savedEmail) {
+      const waiting = node('option', 'Loading saved evidence…'); waiting.value = ''; input.append(waiting); input.disabled = true; savedEvidenceSelect = input;
+    } else if (options) for (const choice of options) { const option = node('option', typeof choice === 'string' ? choice : choice.label || choice.id); option.value = typeof choice === 'string' ? choice : choice.id || choice.value; input.append(option); }
+    else { input.type = field.name === 'url' ? 'url' : field.type === 'number' ? 'number' : 'text'; input.maxLength = field.name === 'url' ? 2000 : 500; }
+    const initial = args[field.name] ?? field.default ?? (field.name === 'query' ? $('investigation-query').value : field.name === 'username' ? lineValues('public-usernames')[0] || '' : field.name === 'url' ? lineValues('seed-urls')[0] || '' : '');
+    if (initial !== '') input.value = String(initial);
+    input.required = field.required !== false; fields.append(label, input);
+    if (field.description) fields.append(node('p', field.description, 'small muted'));
+  }
+  $('connector-disclosure').textContent = !connectorOnline(connector) ? 'Processes saved evidence on this machine. No external request.' : 'Only the inputs shown here are sent to this source. Saved private identifiers are not included. A successful lookup does not establish identity.';
+  $('run-connector').disabled = !!savedEvidenceSelect || !connectorReady(connector) || connectorOnline(connector) && !status.network;
+  if (!$('connector-dialog').open) $('connector-dialog').showModal();
+  fields.querySelector('input, select')?.focus();
+  if (savedEvidenceSelect) {
+    const active = () => currentCase === caseId && connectorCase === caseId && connectorOpenVersion === openVersion && $('connector-dialog').open;
+    try {
+      const view = await api('/api/view?' + new URLSearchParams({case: caseId}));
+      if (!active()) return;
+      const evidence = (view.evidence || []).filter(item => !String(item.source || '').startsWith('local-osint:'));
+      if (args.evidence_id && !evidence.some(item => item.id === args.evidence_id)) {
+        const previous = await api('/api/evidence?' + new URLSearchParams({case: caseId, id: args.evidence_id}));
+        if (!active()) return;
+        if (!String(previous.source || '').startsWith('local-osint:')) evidence.push(previous);
+      }
+      const preference = item => /\.eml(?:$|[?#])/i.test(item.title || '') || /\.eml(?:$|[?#])/i.test(item.source || '') ? 0 : item.format === 'text' ? 1 : 2;
+      evidence.sort((left, right) => preference(left) - preference(right));
+      const placeholder = node('option', evidence.length ? 'Choose saved email or header evidence' : 'No saved evidence available'); placeholder.value = '';
+      savedEvidenceSelect.replaceChildren(placeholder);
+      for (const item of evidence) { const option = node('option', [item.title || 'Untitled source', item.source || item.format].filter(Boolean).join(' · ')); option.value = item.id; savedEvidenceSelect.append(option); }
+      savedEvidenceSelect.value = evidence.some(item => item.id === args.evidence_id) ? args.evidence_id : '';
+      savedEvidenceSelect.disabled = !evidence.length;
+      $('run-connector').disabled = !evidence.length || !connectorReady(connector);
+      fields.append(node('p', evidence.length ? 'Email (.eml) and plain-text originals appear first. Select a source by title; processing stays local and original bytes remain intact.' : 'Import an email (.eml) or paste its headers under Import a file or paste notes, then reopen this tool. Original message bytes stay on this machine.', 'small muted'));
+      if (view.evidence?.length === view.limits?.evidence) fields.append(node('p', 'The newest 200 saved sources are listed. An earlier source remains selected when you edit one of its saved actions.', 'small muted'));
+      if (evidence.length) savedEvidenceSelect.focus();
+    } catch (error) {
+      if (!active()) return;
+      savedEvidenceSelect.replaceChildren(node('option', 'Saved evidence could not be loaded'));
+      fields.append(node('p', error.message || 'Close this tool and retry loading saved evidence.', 'step-error'));
+      $('run-connector').disabled = true;
+    }
+  }
+}
+action($('source-settings-form'), async () => { await saveSourceSettings(); notice('Source settings saved for this case.'); }, 'submit');
+$('source-settings-form').addEventListener('input', () => { sourceSettingsDirty = true; });
+$('keep-working').addEventListener('change', () => { $('runtime-seconds').disabled = $('keep-working').checked; });
+action($('resume-workspace'), async () => { await saveSourceSettings(); const caseId = currentCase; await api('/api/resume', {case: caseId}); await refreshResearch(caseId); await refreshRun(caseId); notice('Saved research resumed. Watch the action queue for outcomes.'); });
+action($('start-search-service'), async () => {
+  const engines = [...document.querySelectorAll('[name="metasearch-engine"]:checked')].map(input => input.value);
+  if (!engines.length) throw new Error('Select at least one metasearch engine.');
+  const image = $('search-service-image').value.trim();
+  $('search-service-status').textContent = 'Preparing owned metasearch. The first image download can take a few minutes…';
+  const service = await api('/api/search-service/start', {settings: {engines, ...(image ? {image} : {})}});
+  renderSearchService(service); await loadConnectors(); notice('Metasearch setup requested. Service status shows availability and setup errors.');
+});
+action($('stop-search-service'), async () => { renderSearchService(await api('/api/search-service/stop', {})); await loadConnectors(); });
+action($('close-connector'), () => $('connector-dialog').close());
+action($('relationship-candidate'), () => {
+  if (relationshipWorkspace?.caseId === currentCase) renderRelationships(relationshipWorkspace.workspace, currentCase);
+}, 'change');
+action($('connector-form'), async () => {
+  if (connectorCase !== currentCase || !selectedConnector) throw new Error('Select the source again for the current case.');
+  const args = {};
+  for (const input of document.querySelectorAll('[data-connector-field]')) args[input.dataset.connectorField] = input.type === 'number' ? Number(input.value) : input.value.trim();
+  const caseId = currentCase;
+  if (sourceSettingsDirty) await saveSourceSettings(caseId);
+  await api('/api/action', {case: caseId, connector: selectedConnector.id, arguments: args});
+  $('connector-dialog').close(); await refreshResearch(caseId); await refreshRun(caseId); notice('Source action queued. Its inputs, attempts and evidence are saved.');
+}, 'submit');

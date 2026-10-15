@@ -205,12 +205,22 @@ class InvestigationTests(unittest.TestCase):
         Jobs(self.engine)
         self.assertEqual(self.engine.latest_investigation(other['id'])['status'], 'interrupted')
 
-    def test_known_identifier_domain_takes_priority_over_candidate_website(self):
-        case = self.engine.create_case('Mozilla', 'organization', identifiers=['mozilla.org'])
+    def test_approved_public_seed_domain_takes_priority_over_candidate_website(self):
+        case = self.engine.create_case('Mozilla', 'organization', identifiers=['private.example.org'])
         with patch('local_osint.collector.fetch_public', side_effect=self.provider), patch('local_osint.collector.research', side_effect=self.signals):
-            report = Investigation(self.engine, case['id'], True).run()
+            report = Investigation(self.engine, case['id'], True, options={'seed_urls': ['https://mozilla.org/']}).run()
         self.assertEqual(report['domain_lead']['domain'], 'mozilla.org')
         self.assertIn('User supplied', report['domain_lead']['basis'])
+
+    def test_saved_private_urls_and_domains_are_not_automatic_collection_inputs(self):
+        case = self.engine.create_case('Private Clue Target', 'person',
+            identifiers=['https://private.example.org/profile', 'secret.example.org'])
+        with patch('local_osint.collector.fetch_public') as fetch, patch('local_osint.collector.research') as research:
+            report = Investigation(self.engine, case['id'], True,
+                options={'tools': ['domain'], 'packs': [], 'page_limit': 1}).run()
+        fetch.assert_not_called()
+        research.assert_not_called()
+        self.assertNotIn('domain_lead', report)
 
     def test_rank_and_qualifiers_preserve_statement_scope_and_current_website_leads(self):
         def statement(value, rank='normal', qualifiers=None):

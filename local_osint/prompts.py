@@ -4,6 +4,10 @@ from .engine import InvalidInput
 
 
 DEFAULT_PROMPTS = {
+    'action': ('Choose the queued action most likely to resolve an evidence gap. Prefer an untried primary source or a '
+        'different source family after poor results. Select only an offered action ID; never invent inputs or confirm identity.'),
+    'extract': ('Extract concise observations from the supplied passage. Copy exact supporting text and literal values. '
+        'Keep candidate attribution uncertain. Report contradictions rather than merging namesakes.'),
     'plan': (
         'Choose the next public research step that adds useful evidence. Prefer an untried relevant page, then a fresh search. '
         'Adapt to focus_type: for a person, look for public professional profiles, publications, interviews and affiliations; '

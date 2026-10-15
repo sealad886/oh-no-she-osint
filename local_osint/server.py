@@ -19,6 +19,8 @@ from .collector import collect, research, discover
 from .engine import InvalidInput, MAX_BYTES
 from .investigation import Jobs
 from .ai import LocalAI
+from .workspace import Workspace
+from .search_service import SearchService
 
 STATIC = Path(__file__).parent / "static"
 MAX_REQUEST = 3 * 1024 * 1024
@@ -51,7 +53,9 @@ class LocalServer(ThreadingHTTPServer):
         self.origin = f"http://127.0.0.1:{self.server_port}"
         self.host = f"127.0.0.1:{self.server_port}"
         self.ai = LocalAI(engine, model_path)
-        self.jobs = Jobs(engine, allow_network, self.ai)
+        self.workspace = Workspace(engine)
+        self.search_service = SearchService(engine.directory)
+        self.jobs = Jobs(engine, allow_network, self.ai, self.search_service)
         if shutdown_on_close:
             self._watchdog = threading.Thread(target=self._watch_pages, name='osint-page-watchdog', daemon=True)
             self._watchdog.start()
@@ -72,7 +76,11 @@ class LocalServer(ThreadingHTTPServer):
                 if hasattr(self, 'ai'):
                     self.ai.stop()
             finally:
-                super().server_close()
+                try:
+                    if hasattr(self, 'search_service'):
+                        self.search_service.stop()
+                finally:
+                    super().server_close()
 
     def _request_page_shutdown(self):
         # shutdown() waits for serve_forever(); never call it from an HTTP handler's serving thread.
@@ -265,6 +273,21 @@ class Handler(BaseHTTPRequestHandler):
                         {'id': key, 'label': label} for key, label in SEARCH_PROVIDERS.items()]})
                 elif path == "/api/cases":
                     self.reply(200, engine.cases())
+                elif path == '/api/connectors':
+                    from .connectors import catalogue
+                    self.reply(200, {'connectors': catalogue({'search_service': self.server.search_service}),
+                        'search_service': self.server.search_service.status()})
+                elif path == '/api/search-service':
+                    self.reply(200, self.server.search_service.status())
+                elif path == '/api/workspace':
+                    from .frontier import default_settings
+                    with engine.connection() as db:
+                        case = engine.require_case(db, case_id)
+                    state = self.server.workspace.snapshot(case_id)
+                    state['settings'] = {**default_settings(case), **state['settings']}
+                    for task in state['tasks']:
+                        task['attempt_history'] = self.server.workspace.attempts(case_id, task['id'])
+                    self.reply(200, state)
                 elif path == "/api/view":
                     self.reply(200, engine.view(case_id, params.get("q", [""])[0], params.get("kind", [""])[0]))
                 elif path == "/api/investigation":
@@ -288,6 +311,42 @@ class Handler(BaseHTTPRequestHandler):
                     self.reply(200, self.server.page_lifecycle(path.rsplit('/', 1)[-1], data))
                 elif path == "/api/cases":
                     self.reply(201, engine.create_case(data.get("name"), data.get("focus_type", "topic"), data.get("aliases"), data.get("identifiers")))
+                elif path == '/api/workspace/settings':
+                    from .frontier import SOURCE_KEYS, source_settings
+                    settings = data.get('settings')
+                    if not isinstance(settings, dict) or set(settings) - SOURCE_KEYS:
+                        raise InvalidInput('Choose supported source settings.')
+                    self.reply(200, self.server.workspace.configure(data.get('case'), source_settings(settings)))
+                elif path == '/api/action':
+                    from .connectors import validate_arguments
+                    args = validate_arguments(data.get('connector'), data.get('arguments'))
+                    self.reply(202, self.server.jobs.start(data.get('case'), action={'tool': data['connector'], 'arguments': args}))
+                elif path == '/api/resume':
+                    self.reply(202, self.server.jobs.start(data.get('case'), action={'tool': 'resume_queue', 'arguments': {}}))
+                elif path == '/api/task':
+                    if self.server.jobs.active:
+                        raise InvalidInput('Pause the investigation before editing queued work.')
+                    operation = data.get('operation')
+                    if operation not in {'retry', 'skip', 'priority', 'edit'}:
+                        raise InvalidInput('Choose retry, skip, edit or priority.')
+                    task = self.server.workspace.edit_action(data.get('case'), data.get('id'),
+                        arguments=data.get('arguments') if operation == 'edit' else None,
+                        priority=data.get('priority') if operation == 'priority' else None,
+                        state='pending' if operation in {'retry', 'edit'} else 'skipped' if operation == 'skip' else None)
+                    if operation in {'retry', 'edit'}:
+                        settings = self.server.workspace.settings(data.get('case'))
+                        self.server.workspace.configure(data.get('case'), {'approved_actions': list(dict.fromkeys([*settings.get('approved_actions', []), task['id']]))})
+                        self.reply(202, self.server.jobs.start(data.get('case'), action={'tool': 'resume_queue', 'arguments': {'id': task['id']}}))
+                    else:
+                        self.reply(200, task)
+                elif path == '/api/search-service/start':
+                    if not self.server.allow_network:
+                        raise InvalidInput('Offline mode does not permit starting an external search service.')
+                    if self.server.jobs.active:
+                        raise InvalidInput('Stop collection before changing the search service.')
+                    self.reply(202, self.server.search_service.start_async(data.get('settings')))
+                elif path == '/api/search-service/stop':
+                    self.reply(200, self.server.search_service.stop())
                 elif path == "/api/investigate":
                     self.reply(202, self.server.jobs.start(data.get('case'), data.get('ai', False), data.get('options')))
                 elif path == "/api/continue":
