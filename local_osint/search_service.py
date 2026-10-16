@@ -10,7 +10,6 @@ import base64
 from contextlib import contextmanager
 import hashlib
 import json
-import os
 from pathlib import Path
 import re
 import secrets
@@ -21,6 +20,8 @@ import time
 
 from .collector import public_url
 from .engine import InvalidInput, MAX_BYTES, private_directory
+from .owned_process import WorkerLease
+from .private_files import write_private_json as _write_private
 
 
 DEFAULT_IMAGE = "docker.io/searxng/searxng:latest"
@@ -40,45 +41,52 @@ finally: c.close()
 """
 
 
-def _write_private(path, value):
-    if path.is_symlink():
-        raise InvalidInput("Search service files must not be symlinks.")
-    temp = path.with_name(path.name + "." + secrets.token_hex(6))
-    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(fd, "w") as stream:
-            json.dump(value, stream)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temp, path)
-    finally:
-        if temp.exists():
-            temp.unlink()
-
-
 class SearchService:
-    def __init__(self, directory):
+    def __init__(self, directory, diagnostics=None):
         self.directory = private_directory(Path(directory) / "search-service")
+        self.lease = WorkerLease(self.directory, "manager.lock")
         self.path = self.directory / "state.json"
+        self.diagnostics = diagnostics
         self.workspace = hashlib.sha256(str(Path(directory).resolve()).encode()).hexdigest()[:24]
         self.binary = shutil.which("docker")
         self.lock = threading.RLock()
         self.worker_lock = threading.RLock()
         self.process_lock = threading.RLock()
+        self.close_lock = threading.RLock()
         self.worker = None
+        self.stop_worker = None
+        self.closed = self.closing = False
         self.command_process = None
         self.cancel = threading.Event()
         self.stopping = False
         self.last_error = ""
         self.phase = ""
         self.message = "Set up the optional search service. Docker must already be installed and running."
-        self.state = self._load()
-        # Reconcile only the exact persisted ownership receipt, never all containers.
-        if self.binary and self.state.get("container"):
-            try:
-                self.stop()
-            except InvalidInput:
-                self.message = "Previous search service ownership retained. Start Docker, then stop/reconcile the owned service."
+        if not self.lease.acquire():
+            raise InvalidInput("This workspace is already open in another app session. Close that session before reopening it.")
+        try:
+            self.state = self._load()
+            # Lease proves no live manager owns this receipt before reconciliation.
+            if self.binary and self.state.get("container"):
+                try:
+                    self.stop()
+                except InvalidInput:
+                    self.message = "Previous search service ownership retained. Start Docker, then stop/reconcile the owned service."
+        except BaseException:
+            self.closed = True
+            self.lease.release()
+            raise
+
+    def _ensure_open(self):
+        if self.closed or self.closing:
+            raise InvalidInput("This search service session is closed. Relaunch the app to start a new session.")
+
+    def _unexpected_error(self, operation, exc):
+        message = "Search service operation failed. Retry, or reopen the app if the problem persists."
+        if self.diagnostics:
+            event = self.diagnostics.record(operation, exc)
+            message += " Diagnostic reference: " + event["id"] + "."
+        self.last_error = self.message = message
 
     def _load(self):
         if self.path.is_symlink():
@@ -176,6 +184,10 @@ class SearchService:
         return record
 
     def status(self):
+        if self.closed:
+            return self._snapshot("closed")
+        if self.stopping:
+            return self._snapshot("stopping")
         if self.worker and self.worker.is_alive() and self.phase:
             return self._snapshot(self.phase)
         if not self.lock.acquire(blocking=False):
@@ -192,7 +204,7 @@ class SearchService:
                     pass
             if record and not ready and not self.last_error:
                 return self._snapshot("unhealthy")
-            return self._snapshot("ready" if ready else "error" if self.last_error else "stopped" if self.state.get("image_id") else "unavailable" if not self.binary else "not_configured")
+            return self._snapshot("error" if self.last_error else "ready" if ready else "stopped" if self.state.get("image_id") else "unavailable" if not self.binary else "not_configured")
         finally:
             self.lock.release()
 
@@ -210,8 +222,13 @@ class SearchService:
                 "transport": "container-private loopback via Docker exec", "license": "AGPL-3.0-or-later"}
 
     @contextmanager
-    def _operation(self, phase):
+    def _operation(self, phase, cleanup=False):
         with self.lock:
+            if not cleanup:
+                self._ensure_open()
+                self._check_cancelled()
+                if self.stopping:
+                    raise InvalidInput("The search service is stopping. Wait for completion before retrying.")
             previous = self.phase
             self.phase = phase
             try:
@@ -250,6 +267,7 @@ class SearchService:
         if settings is not None and not isinstance(settings, dict):
             raise InvalidInput("Search setup settings must be an object.")
         with self.worker_lock:
+            self._ensure_open()
             if self.stopping or (self.worker and self.worker.is_alive()):
                 raise InvalidInput("A search service operation is already running.")
             self.cancel.clear()
@@ -261,9 +279,8 @@ class SearchService:
                 except InvalidInput as exc:
                     self.last_error = str(exc)
                     self.message = self.last_error
-                except Exception:
-                    self.last_error = "Search service setup/start failed. Check Docker and image compatibility."
-                    self.message = self.last_error
+                except Exception as exc:
+                    self._unexpected_error("search_service_start", exc)
                 finally:
                     self.phase = ""
             self.worker = threading.Thread(target=run, name="owned-search-service", daemon=True)
@@ -366,6 +383,9 @@ class SearchService:
         if not isinstance(query, str) or not query.strip() or len(query) > 300 or any(ord(c) < 32 for c in query):
             raise InvalidInput("Use a public search query up to 300 characters without control characters.")
         with self.lock:
+            self._ensure_open()
+            if self.stopping:
+                raise InvalidInput("The search service is stopping. Wait for completion before searching.")
             if not self.state.get("container") or not self.state.get("engines"):
                 raise InvalidInput("Start the configured local search service in Sources before searching.")
             response = self._http("POST", "/search", urlencode({"q": query, "format": "json", "engines": ",".join(self.state["engines"])}))
@@ -382,28 +402,73 @@ class SearchService:
                     "upstream_failures": failures if isinstance(failures, list) else [],
                     "request_count_note": "Configured engine fanout; exact upstream requests may differ. Separate transport from pinned HTTPS collector."}
 
-    def stop(self):
-        with self.worker_lock:
-            self.stopping = True
-            self.cancel.set()
-            worker = self.worker
-        try:
-            with self.process_lock:
-                process = self.command_process
-            if worker and worker.is_alive() and worker is not threading.current_thread() and process:
-                if process.poll() is None:
+    def _begin_stop(self):
+        """Called under worker_lock; keep the startup identity until it is joined."""
+        if self.stop_worker and self.stop_worker.is_alive():
+            return self.stop_worker
+        startup = self.worker
+        self.stopping = True
+        self.cancel.set()
+        self.last_error = ""
+        def run():
+            try:
+                with self.process_lock:
+                    process = self.command_process
+                if startup and startup.is_alive() and process and process.poll() is None:
                     process.terminate()
-            if worker and worker is not threading.current_thread():
-                worker.join(timeout=6)
-                if worker.is_alive():
-                    raise InvalidInput("Search setup is still stopping. Ownership retained; retry Stop shortly.")
-            return self._cleanup_owned()
-        finally:
+                if startup and startup is not threading.current_thread():
+                    # CLI operations have bounded timeouts; retain the lease until
+                    # the original worker and its cancellation cleanup are done.
+                    startup.join()
+                self._cleanup_owned()
+            except InvalidInput as exc:
+                self.last_error = self.message = str(exc)
+            except Exception as exc:
+                self._unexpected_error("search_service_stop", exc)
+            finally:
+                with self.worker_lock:
+                    self.phase = ""
+                    self.stopping = False
+        self.stop_worker = threading.Thread(target=run, name="owned-search-service-stop", daemon=True)
+        self.stop_worker.start()
+        return self.stop_worker
+
+    def stop_async(self):
+        """Return immediately while status exposes stopping, stopped or error."""
+        with self.worker_lock:
+            self._ensure_open()
+            self._begin_stop()
+            return self._snapshot("stopping")
+
+    def stop(self):
+        """Wait for owned cleanup, preserving manager ownership for later restart."""
+        with self.worker_lock:
+            self._ensure_open()
+            worker = self._begin_stop()
+        worker.join()
+        if self.last_error:
+            raise InvalidInput(self.last_error)
+        return {"state": "stopped", "configured": bool(self.state.get("image_id"))}
+
+    def close(self):
+        """End this manager lifetime only after background operations have ended."""
+        with self.close_lock:
+            if self.closed:
+                return
             with self.worker_lock:
-                self.stopping = False
+                self.closing = True
+                worker = self._begin_stop()
+            worker.join()
+            try:
+                if self.last_error:
+                    raise InvalidInput(self.last_error)
+            finally:
+                with self.lock:
+                    self.closed = True
+                    self.lease.release()
 
     def _cleanup_owned(self):
-        with self._operation("stopping"):
+        with self._operation("stopping", cleanup=True):
             record = self._inspect_owned(cancellable=False)
             if self.state.get("container") and record is None:
                 # An absent container is safe to acknowledge only after the daemon

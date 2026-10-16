@@ -32,6 +32,10 @@ event, the heartbeat expires after 90 seconds. **Ctrl+C** also stops the app.
 Saved cases remain on disk. Reopen with `./start.sh`, select the case, and use
 **Resume pending actions** or **Continue investigation**.
 
+Only one app session can own a workspace at a time. If a second launch says the
+workspace is already open, return to the existing app or close that session before
+relaunching. Opening several pages from the same running app is supported.
+
 ```sh
 ./start.sh --port 9000                    # request a specific free local port
 ./start.sh --data-dir ./private-cases     # choose private local storage
@@ -165,6 +169,21 @@ Cooldowns and connector health survive restarts. Inspect the eligible-after time
 before retrying; retry cannot bypass a current rate-limit cooldown. A partial run
 can retain cooling-down work for later resumption.
 
+**Retry** authorizes a fresh attempt with that action's exact inputs, even when a
+previous page attempt failed or is cached. Prior attempts and originals remain
+available. Edited inputs become a separate action. Automatic Continue does not
+refetch previously attempted pages; use their individual Retry control when needed.
+
+Temporary search failures can recover automatically through **Continue
+investigation** or **Resume pending actions**. Eligible search actions have at most
+three total automatic attempts, with a 60-second cooldown for transient failures
+and a 300-second cooldown for rate limits. The app honors later provider cooldowns
+and still applies the run's collection/time limits. It does not wait indefinitely
+for cooling-down work: resume again after the displayed eligible time. Completed
+work, permanent access blocks and imported historical tasks are not automatically
+restarted. Explicit Retry remains available after the automatic limit, subject to
+the same authorization and cooldown checks.
+
 Defaults: **24 collection units**, **4 useful pages**, **300 seconds**. Request
 ceiling and page goal accept positive exact browser integers through 2^53−1.
 Choose another duration or enable **Keep working while this page is open**
@@ -293,6 +312,12 @@ If Docker is already running, check its connection and permissions. Progress and
 errors update automatically, and **Stop metasearch** can cancel an active setup.
 Your saved cases, evidence and pinned image settings survive a failed start.
 
+Stop is also a background operation. The panel shows **stopping** until Docker
+cleanup finishes, then shows the stopped state or a recoverable error. Wait for
+that result before starting again. If cleanup fails, the ownership receipt remains
+and Stop can be retried after Docker recovers. Closing the app waits for its owned
+cleanup; stopping metasearch alone keeps the current app's workspace ownership.
+
 The app checks SearXNG's private HTTP health endpoint before reporting it ready.
 A running Docker container alone is not enough. Setup errors identify the failed
 stage, such as image download, configuration copy or container startup. If the
@@ -322,6 +347,21 @@ collector's DNS validation or IP pinning**. Engine selection, timeouts and disab
 retries constrain behavior but do not make the transports equivalent. Upstream
 engines see approved queries and the network's public IP. Read
 [security](SECURITY.md) and [qualification status](docs/validation.md).
+
+## Local diagnostics and connection errors
+
+Unexpected app or background-service failures show a diagnostic reference. Open
+**Local diagnostics** and press **Refresh diagnostics** to find its time, operation
+and exception category. Up to 100 events are retained in the private workspace's
+`diagnostics.json`; if saving fails, available events remain visible for the current
+session. Request contents, URLs, search queries, case clues, credentials and
+exception messages are excluded. Expected source blocks and rate limits remain in
+the action's tool activity instead.
+
+An unreadable proxy response reports its HTTP status without displaying proxy HTML.
+Check the operation's status before retrying because it may still finish after a
+connection error. If the app stopped, reopen it with `./start.sh`; saved evidence
+remains on disk.
 
 ## Collection and privacy
 

@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 import tarfile
 import threading
@@ -25,7 +26,11 @@ class SearchServiceTests(unittest.TestCase):
         self.image_id = "sha256:" + "a" * 64
 
     def tearDown(self):
-        self.tmp.cleanup()
+        try:
+            with patch.object(self.manager, "_run", side_effect=self.fake_runtime):
+                self.manager.close()
+        finally:
+            self.tmp.cleanup()
 
     def fake_runtime(self, args, *, input=None, timeout=15, cancellable=True):
         self.calls.append((args, input))
@@ -35,6 +40,8 @@ class SearchServiceTests(unittest.TestCase):
             if not self.created:
                 raise InvalidInput("Missing fixture container")
             return json.dumps([{"Config": {"Labels": {LABEL_WORKSPACE: self.manager.workspace, LABEL_NONCE: self.manager.state["nonce"]}}, "State": {"Running": self.running}, "HostConfig": {"PortBindings": {}}}]).encode()
+        if args[:2] == ["container", "ls"]:
+            return (self.manager.state["container"] if self.created else "").encode()
         if args[0] == "create":
             self.created = True
         if args[0] == "start":
@@ -55,6 +62,7 @@ class SearchServiceTests(unittest.TestCase):
     def test_missing_runtime_actionable_and_no_implicit_setup(self):
         with patch("local_osint.search_service.shutil.which", return_value=None):
             manager = SearchService(Path(self.tmp.name) / "missing")
+        self.addCleanup(manager.close)
         self.assertEqual(manager.status()["state"], "unavailable")
         with self.assertRaises(InvalidInput):
             manager.start()
@@ -244,11 +252,177 @@ class SearchServiceTests(unittest.TestCase):
         with patch.object(self.manager, "_run", side_effect=self.fake_runtime):
             self.manager.setup()
             self.manager.start()
+        # Simulate OS releasing a crashed owner's descriptor without cleanup.
+        self.manager.lease.release()
+        self.manager.closed = True
         with patch("local_osint.search_service.shutil.which", return_value="/fixture/docker"), patch.object(SearchService, "_run", side_effect=self.fake_runtime):
             recovered = SearchService(Path(self.tmp.name))
         self.assertFalse(self.created)
         self.assertNotIn("container", recovered.state)
         self.assertEqual(recovered.state["image_id"], self.image_id)
+        recovered.close()
+
+    def test_second_live_manager_cannot_touch_first_receipt_even_after_stop(self):
+        with patch.object(self.manager, "_run", side_effect=self.fake_runtime):
+            self.manager.setup()
+            self.manager.start()
+            original = self.manager.state.copy()
+            with patch.object(SearchService, "_run") as run:
+                with self.assertRaisesRegex(InvalidInput, "already open"):
+                    SearchService(Path(self.tmp.name))
+                run.assert_not_called()
+            self.assertEqual(self.manager.state, original)
+            self.manager.stop()
+            with self.assertRaisesRegex(InvalidInput, "already open"):
+                SearchService(Path(self.tmp.name))
+            self.manager.close()
+        with patch("local_osint.search_service.shutil.which", return_value=None):
+            replacement = SearchService(Path(self.tmp.name))
+        replacement.close()
+
+    def test_failed_initialization_releases_manager_lease(self):
+        directory = Path(self.tmp.name) / "invalid"
+        with patch.object(SearchService, "_load", side_effect=InvalidInput("Invalid state")):
+            with self.assertRaises(InvalidInput):
+                SearchService(directory)
+        replacement = SearchService(directory)
+        replacement.close()
+
+    def test_process_exit_releases_search_manager_ownership(self):
+        directory = Path(self.tmp.name) / "child-owner"
+        code = "from local_osint.search_service import SearchService; import sys,time; manager=SearchService(sys.argv[1]); print('ready',flush=True); time.sleep(30)"
+        with subprocess.Popen([sys.executable, "-c", code, str(directory)], stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True) as child:
+            try:
+                self.assertEqual(child.stdout.readline().strip(), "ready")
+                with self.assertRaisesRegex(InvalidInput, "already open"):
+                    SearchService(directory)
+                child.kill()
+                child.wait(timeout=5)
+                recovered = SearchService(directory)
+                recovered.close()
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait(timeout=5)
+
+    def test_close_failure_preserves_receipt_but_releases_finished_manager(self):
+        with patch.object(self.manager, "_run", side_effect=self.fake_runtime):
+            self.manager.setup()
+            self.manager.start()
+        original = self.manager.state.copy()
+        with patch.object(self.manager, "_run", side_effect=InvalidInput("Docker unavailable")):
+            with self.assertRaises(InvalidInput):
+                self.manager.close()
+        self.assertEqual(self.manager.state, original)
+        self.assertFalse(self.manager.lease.held)
+        self.assertFalse(self.manager.stop_worker.is_alive())
+        with patch("local_osint.search_service.shutil.which", return_value="/fixture/docker"), patch.object(SearchService, "_run", side_effect=self.fake_runtime):
+            recovered = SearchService(Path(self.tmp.name))
+            recovered.close()
+        self.assertFalse(self.created)
+
+    def test_unexpected_background_failure_has_private_diagnostic_reference(self):
+        from local_osint.diagnostics import Diagnostics
+        recorder = Diagnostics(Path(self.tmp.name))
+        self.manager.diagnostics = recorder
+        for operation in ("start", "stop"):
+            with self.subTest(operation=operation), patch.object(self.manager, "_run", side_effect=RuntimeError("private query and token")):
+                if operation == "start":
+                    self.manager.start_async({})
+                    worker = self.manager.worker
+                else:
+                    self.manager.state["container"] = "osint-search-" + self.manager.workspace + "-" + "b" * 16
+                    self.manager.state["nonce"] = "b" * 16
+                    self.manager.stop_async()
+                    worker = self.manager.stop_worker
+                worker.join(timeout=2)
+                # Status also probes the runtime; use only the terminal error
+                # snapshot to avoid introducing a separate foreground failure.
+                self.assertIn(recorder.recent()[0]["id"], self.manager.last_error)
+                self.assertEqual(recorder.recent()[0]["operation"], "search_service_" + operation)
+                self.assertNotIn("private query", self.manager.last_error)
+                self.assertNotIn("private query", recorder.path.read_text())
+        self.manager.state.pop("container")
+        self.manager.state.pop("nonce")
+
+    def test_closed_manager_rejects_mutations_and_close_is_idempotent(self):
+        self.manager.close()
+        with patch.object(self.manager, "_run") as run:
+            for operation in (self.manager.start, self.manager.start_async, self.manager.setup,
+                              self.manager.stop, self.manager.stop_async,
+                              lambda: self.manager.search("public topic")):
+                with self.subTest(operation=operation), self.assertRaisesRegex(InvalidInput, "closed"):
+                    operation()
+            self.manager.close()
+            run.assert_not_called()
+        self.assertEqual(self.manager.status()["state"], "closed")
+
+    def test_async_stop_is_prompt_pollable_and_repeated_stop_joins_same_work(self):
+        entered, release = threading.Event(), threading.Event()
+        def runtime(args, **kwargs):
+            if args[0] == "stop":
+                entered.set()
+                release.wait(timeout=3)
+            return self.fake_runtime(args, **kwargs)
+        with patch.object(self.manager, "_run", side_effect=runtime):
+            self.manager.setup()
+            self.manager.start()
+            began = time.monotonic()
+            self.assertEqual(self.manager.stop_async()["state"], "stopping")
+            self.assertLess(time.monotonic() - began, 0.5)
+            self.assertTrue(entered.wait(timeout=1))
+            worker = self.manager.stop_worker
+            self.assertEqual(self.manager.status()["state"], "stopping")
+            self.assertEqual(self.manager.stop_async()["state"], "stopping")
+            self.assertIs(self.manager.stop_worker, worker)
+            with self.assertRaises(InvalidInput):
+                self.manager.start_async()
+            release.set()
+            worker.join(timeout=2)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(self.manager.status()["state"], "stopped")
+            self.assertEqual(sum(args[0] == "stop" for args, _ in self.calls), 1)
+
+    def test_async_stop_failure_retains_receipt_and_retry_cleans_it(self):
+        with patch.object(self.manager, "_run", side_effect=self.fake_runtime):
+            self.manager.setup()
+            self.manager.start()
+        original = self.manager.state.copy()
+        def failing(args, **kwargs):
+            if args[0] == "stop":
+                raise InvalidInput("Docker stop failed. Start Docker and retry Stop.")
+            return self.fake_runtime(args, **kwargs)
+        with patch.object(self.manager, "_run", side_effect=failing):
+            self.manager.stop_async()
+            self.manager.stop_worker.join(timeout=2)
+            result = self.manager.status()
+            self.assertEqual(result["state"], "error")
+            self.assertIn("retry Stop", result["error"])
+            self.assertEqual(self.manager.state, original)
+        with patch.object(self.manager, "_run", side_effect=self.fake_runtime):
+            self.manager.stop_async()
+            self.manager.stop_worker.join(timeout=2)
+            self.assertEqual(self.manager.status()["state"], "stopped")
+            self.assertFalse(self.created)
+
+    def test_async_stop_cancels_original_start_worker_before_cleanup(self):
+        entered = threading.Event()
+        def runtime(args, **kwargs):
+            if args[0] == "pull":
+                entered.set()
+                self.manager.cancel.wait(timeout=2)
+            return self.fake_runtime(args, **kwargs)
+        with patch.object(self.manager, "_run", side_effect=runtime):
+            self.manager.start_async({})
+            startup = self.manager.worker
+            self.assertTrue(entered.wait(timeout=1))
+            self.manager.stop_async()
+            self.manager.close()
+            self.assertFalse(startup.is_alive())
+            self.assertFalse(self.manager.stop_worker.is_alive())
+            self.assertFalse(self.manager.lease.held)
+        self.assertFalse(any(args[0] in {"create", "start"} for args, _ in self.calls))
 
     def test_stop_terminates_owned_container_cli_and_joins_setup_worker(self):
         marker = Path(self.tmp.name) / "pull.pid"

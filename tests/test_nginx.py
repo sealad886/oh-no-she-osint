@@ -86,6 +86,30 @@ class NginxTests(unittest.TestCase):
                 status, _, body = request("POST", "/api/cases", json.dumps({"name": "Proxy subject", "focus_type": "organization"}), headers)
                 self.assertEqual(status, 201)
                 self.assertEqual(json.loads(body)["name"], "Proxy subject")
+                # A blocked cleanup must remain a pollable operation through
+                # the real proxy, rather than occupying its HTTP timeout.
+                entered, release = threading.Event(), threading.Event()
+                stop = backend.search_service._cleanup_owned
+                def slow_stop():
+                    entered.set()
+                    release.wait(15)
+                    return stop()
+                try:
+                    with patch.object(backend.search_service, '_cleanup_owned', side_effect=slow_stop):
+                        start = time.monotonic()
+                        status, _, body = request('POST', '/api/search-service/stop', '{}', headers)
+                        self.assertEqual(status, 202)
+                        self.assertLess(time.monotonic() - start, 2)
+                        self.assertEqual(json.loads(body)['state'], 'stopping')
+                        self.assertTrue(entered.wait(1))
+                        status, _, body = request('GET', '/api/search-service', headers=headers)
+                        self.assertEqual(status, 200)
+                        self.assertEqual(json.loads(body)['state'], 'stopping')
+                        release.set()
+                        backend.search_service.stop_worker.join(2)
+                        self.assertFalse(backend.search_service.stop_worker.is_alive())
+                finally:
+                    release.set()
                 self.assertEqual(request("POST", "/api/cases", b"x" * (MAX_REQUEST + 1), headers)[0], 413)
                 self.assertFalse(list(runtime.glob("*access*")))
                 self.assertEqual(list((runtime / "body").iterdir()), [])

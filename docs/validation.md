@@ -1,5 +1,42 @@
 # Validation evidence
 
+## Recovery and runtime reliability package — 2026-10-16
+
+The implementation covers fresh explicitly approved page retries, bounded recovery
+of transient search failures, exclusive service-manager ownership, asynchronous
+Stop, private diagnostics and understandable transport errors. Acceptance criteria
+and integration status are tracked in [the reliability plan](reliability-fixes.md).
+
+Focused service qualification passed **26 tests** with
+`.venv/bin/python -W error::ResourceWarning -m unittest discover -s tests -p test_search_service.py`.
+These use an isolated Docker runtime fixture plus native child-process ownership
+tests. They verify second-manager rejection before Docker access, process-death
+lease release, stale receipt recovery, initialization cleanup, closed-manager
+rejection, prompt/pollable Stop, cancellation and joined close, failed Stop retry,
+and metadata-only background diagnostic references. No existing case data or real
+Docker service was modified by those focused checks.
+
+Whole-package qualification passed **377 Python tests** in **27.550 seconds**
+with `-W error::ResourceWarning`, and **28 UI controller tests**. JavaScript syntax,
+Python compilation and whitespace checks passed. Authenticated HTTP journeys
+prove failed-page Retry performs one fresh request with prior attempts/originals
+retained, Continue respects persisted cooldowns, and a rejected second app leaves
+the first usable and releases its failed listener. Native nginx tests verify
+prompt asynchronous Stop while cleanup is deliberately blocked.
+
+A separate native nginx → app → Docker → SearXNG journey accepted setup in
+**0.002 seconds**, reached HTTP-ready, completed a real public metasearch action,
+and accepted Stop in **0.003 seconds** before reaching `stopped`. Fresh container
+logs had zero missing-forwarding-header errors and zero missing-limiter warnings;
+unexpected diagnostic events were zero. A synthetic original's SHA-256 remained
+unchanged. The official Linux/arm64 image resolved during this run to
+`sha256:3619192d55f19eaec4b01892bdf10f80c67e8592fafd14b26ca504e52229210f`.
+The test-owned nginx/container stopped afterward; Docker remained running.
+
+Visible browser qualification and independent review are pending. Historical
+counts and provider results below describe their dated revisions. Real upstream
+availability and target relevance remain independent of lifecycle/recovery proof.
+
 ## Native SearXNG gateway and readiness — 2026-10-16
 
 Fixed the internal gateway's missing forwarding headers and supplied a minimal

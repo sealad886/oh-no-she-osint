@@ -15,14 +15,24 @@ function node(tag, text, className) {
 }
 function notice(message) { $('status').textContent = message; }
 async function api(path, data) {
-  const response = await fetch(path, {
-    method: data === undefined ? 'GET' : 'POST',
-    headers: {'X-OSINT-Local': '1', ...(data === undefined ? {} : {'Content-Type': 'application/json'})},
-    credentials: 'same-origin',
-    ...(data === undefined ? {} : {body: JSON.stringify(data)})
-  });
-  const result = await response.json();
-  if (!response.ok) throw new Error(result.error || 'Request failed.');
+  let response;
+  try {
+    response = await fetch(path, {
+      method: data === undefined ? 'GET' : 'POST',
+      headers: {'X-OSINT-Local': '1', ...(data === undefined ? {} : {'Content-Type': 'application/json'})},
+      credentials: 'same-origin',
+      ...(data === undefined ? {} : {body: JSON.stringify(data)})
+    });
+  } catch (_) {
+    throw new Error('Cannot reach the local app. Check that it is running, or reopen it with ./start.sh. Saved evidence stays on disk.');
+  }
+  let result;
+  try { result = await response.json(); }
+  catch (_) {
+    const code = response.status ? ` (HTTP ${response.status})` : '';
+    throw new Error(`The local service returned an unreadable response${code}. Wait for the operation to finish, then check its status before retrying. Reopen the app if it stopped. Saved evidence stays on disk.`);
+  }
+  if (!response.ok) throw new Error(typeof result?.error === 'string' ? result.error : `Local request failed (HTTP ${response.status || 'unknown'}). Check service status before retrying.`);
   return result;
 }
 const pageLeaseId = crypto.randomUUID();
@@ -256,6 +266,7 @@ for (const [index, id] of ['indicators-tab', 'sources-tab'].entries()) $(id).add
     await loadConnectors();
     await refreshAI();
     $('workspace').hidden = false;
+    $('diagnostics-panel').hidden = false;
     await loadCases();
   } catch (error) { $('locked').hidden = false; notice(error.message); }
 })();
@@ -755,6 +766,7 @@ function updateSearchServiceControls() {
   const active = searchServiceState === 'ready' || searchServiceBusyStates.includes(searchServiceState);
   $('start-search-service').disabled = active;
   $('stop-search-service').hidden = !active && !searchServiceOwned;
+  $('stop-search-service').disabled = searchServiceState === 'stopping';
 }
 async function refreshSearchService() {
   if (pageLeaving) return;
@@ -1024,7 +1036,18 @@ action($('start-search-service'), async () => {
     throw error;
   }
 });
-action($('stop-search-service'), async () => { renderSearchService(await api('/api/search-service/stop', {})); await loadConnectors(); });
+action($('stop-search-service'), async () => {
+  renderSearchService(await api('/api/search-service/stop', {}));
+  notice('Metasearch stop requested. Watch service status for completion.');
+});
+action($('refresh-diagnostics'), async () => {
+  const report = await api('/api/diagnostics');
+  const list = $('diagnostic-events'); list.replaceChildren();
+  const labels = {http_request:'App request', search_service_start:'Metasearch startup', search_service_stop:'Metasearch shutdown', investigation:'Investigation'};
+  for (const event of report.events || []) list.append(node('li', `${event.at} · ${labels[event.operation] || 'Local operation'} · ${event.exception} · Reference ${event.id}`));
+  if (!list.childElementCount) list.append(node('li', 'No unexpected local failures recorded. Expected source blocks remain in tool activity.'));
+  $('diagnostics-status').textContent = report.persistent === false ? 'Events are available for this session, but saving diagnostics failed. Check local disk permissions and space.' : 'Up to 100 metadata-only events are retained locally. No request contents or exception messages are stored.';
+});
 action($('close-connector'), () => $('connector-dialog').close());
 action($('relationship-candidate'), () => {
   if (relationshipWorkspace?.caseId === currentCase) renderRelationships(relationshipWorkspace.workspace, currentCase);

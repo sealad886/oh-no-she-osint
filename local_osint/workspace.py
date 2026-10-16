@@ -17,12 +17,27 @@ from .engine import Engine, InvalidInput, field, now, private_directory
 
 SCHEMA_VERSION = 3
 EXTRACTOR_VERSION = "plain-v1"
+AUTOMATIC_ATTEMPT_LIMIT = 3
+TRANSIENT_RETRY_SECONDS = 60
+RATE_LIMIT_RETRY_SECONDS = 300
+RECOVERABLE_SEARCH_CONNECTORS = frozenset({'web_search', 'search_subject', 'news_search', 'crossref', 'searxng'})
 TASK_STATES = frozenset({"pending", "running", "cooldown", "blocked", "complete", "failed", "skipped", "interrupted_after_dispatch"})
 FINISH_STATES = TASK_STATES - {"pending", "running"}
 CLAIM_STATES = frozenset({"unconfirmed", "supported", "disputed", "rejected"})
 QUESTION_STATES = frozenset({"supported", "disputed", "unresolved", "unavailable"})
 IDENTITY_STATES = frozenset({"same", "different", "uncertain"})
 ORIGIN_KINDS = frozenset({"unknown", "original", "copy", "syndicated", "archive"})
+
+
+def transient_source_failure(error, http_status=None):
+    """Recognize recoverable transport failures, never policy or access blocks."""
+    if http_status is None:
+        match = re.search(r'\bHTTP\s+(\d{3})\b', error or '')
+        http_status = int(match[1]) if match else None
+    if http_status is not None:
+        return http_status in {408, 425, 429, 500, 502, 503, 504}
+    return any(message in (error or '') for message in (
+        'Collection timed out.', 'HTTPS collection failed.'))
 
 TABLES = [
     """CREATE TABLE workspace_settings (case_id TEXT PRIMARY KEY REFERENCES cases(id),
@@ -294,6 +309,37 @@ class Workspace:
             return [self._task(row) for row in db.execute("SELECT * FROM workspace_tasks WHERE case_id=? ORDER BY priority DESC,created_at,id", (case_id,))]
 
     actions = tasks
+
+    def recover_transient_actions(self, case_id):
+        """Requeue eligible saved failures once their cooldown expires.
+
+        Attempts stay attached to the original action. Pages require explicit
+        Retry, and imported history never grants fresh network permission.
+        """
+        from datetime import timedelta
+        recovered = []
+        with self.engine.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self.engine.require_case(db, case_id)
+            for row in db.execute("SELECT * FROM workspace_tasks WHERE case_id=? AND state='failed' AND attempts<?",
+                                  (case_id, AUTOMATIC_ATTEMPT_LIMIT)).fetchall():
+                task = self._task(row)
+                result = task['result'] if isinstance(task['result'], dict) else {}
+                if task['connector'] not in RECOVERABLE_SEARCH_CONNECTORS or result.get('historical_report_id'):
+                    continue
+                retryable = result.get('retryable', transient_source_failure(task['error']))
+                if not retryable:
+                    continue
+                retry_at = task['retry_at']
+                if not retry_at:
+                    seconds = RATE_LIMIT_RETRY_SECONDS if re.search(r'\bHTTP\s+429\b', task['error'] or '') else TRANSIENT_RETRY_SECONDS
+                    retry_at = (datetime.fromisoformat(task['updated_at']) + timedelta(seconds=seconds)).isoformat()
+                if retry_at > now():
+                    continue
+                db.execute("UPDATE workspace_tasks SET state='pending',retry_at=NULL,updated_at=? WHERE id=?", (now(), task['id']))
+                _event(db, case_id, task['id'], 'recovered_transient_failure', {'attempts': task['attempts']})
+                recovered.append(task['id'])
+        return recovered
 
     def start_action(self, case_id, task_id, run_id):
         run_id = field(run_id, "Run ID", 200)

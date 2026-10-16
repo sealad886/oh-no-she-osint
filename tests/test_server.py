@@ -67,6 +67,43 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(set(settings['defaults']), set(DEFAULT_PROMPTS))
         self.assertEqual({p['id'] for p in settings['providers']}, {'duckduckgo', 'bing'})
 
+    def test_unexpected_error_has_private_authenticated_diagnostic_reference(self):
+        self.assertEqual(self.request('/api/diagnostics', authenticated=False)[0], 401)
+        self.assertEqual(self.request('/api/diagnostics', headers={'Origin': 'https://evil.example'})[0], 403)
+        with patch.object(self.engine, 'cases', side_effect=RuntimeError('private-secret-token-and-case')):
+            status, _, result = self.request('/api/cases')
+        self.assertEqual(status, 500)
+        self.assertNotIn('private-secret', json.dumps(result))
+        status, _, diagnostics = self.request('/api/diagnostics')
+        self.assertEqual(status, 200)
+        self.assertTrue(diagnostics['persistent'])
+        self.assertEqual(diagnostics['events'][0]['id'], result['diagnostic_id'])
+        self.assertEqual(diagnostics['events'][0]['exception'], 'RuntimeError')
+        self.assertNotIn('private-secret', self.server.diagnostics.path.read_text())
+
+    def test_search_service_stop_is_async_and_authenticated(self):
+        entered, release = threading.Event(), threading.Event()
+        original_stop = self.server.search_service._cleanup_owned
+        def slow_stop():
+            entered.set()
+            release.wait(5)
+            return original_stop()
+        try:
+            with patch.object(self.server.search_service, '_cleanup_owned', side_effect=slow_stop):
+                self.assertEqual(self.request('/api/search-service/stop', {}, authenticated=False)[0], 401)
+                start = time.monotonic()
+                status, _, result = self.request('/api/search-service/stop', {})
+                self.assertEqual(status, 202)
+                self.assertLess(time.monotonic() - start, 2)
+                self.assertTrue(entered.wait(1))
+                self.assertEqual(result['state'], 'stopping')
+                self.assertEqual(self.request('/api/search-service')[2]['state'], 'stopping')
+                release.set()
+                self.server.search_service.stop_worker.join(2)
+                self.assertNotEqual(self.request('/api/search-service')[2]['state'], 'stopping')
+        finally:
+            release.set()
+
     def test_browser_origin_and_dns_rebinding_are_blocked(self):
         for headers in [{'Origin':'https://evil.example'}, {'Host':'evil.example'}, {'Host':'localhost:' + str(self.server.server_port)}, {'Sec-Fetch-Site':'cross-site'}]:
             self.assertEqual(self.request('/api/cases', headers=headers)[0], 403)

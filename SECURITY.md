@@ -132,6 +132,12 @@ local process died. Resume can repeat supported read-only actions. Exactly-once
 external execution is not claimed. Existing evidence and prior attempts remain.
 
 Rate-limit cooldowns/health survive restart. Retry cannot bypass an active cooldown.
+Explicit Retry authorizes only the selected action's exact inputs and can perform
+a fresh page request despite a cached failure; previous evidence and attempt
+records remain. Automatic recovery does not refetch attempted pages or restart
+completed, permanently blocked or imported historical actions. Eligible search
+failures have at most three automatic attempts, a 60-second transient cooldown
+or 300-second rate-limit cooldown, and respect any later connector deadline.
 In-flight work can complete before Stop takes effect. Request ceiling, page
 collection goal, per-request bounds and cancellation remain effective when the
 user removes the soft elapsed-time deadline with page-scoped keep-working mode.
@@ -209,8 +215,9 @@ The owned container publishes no host port and mounts no host path or Docker
 socket. Its JSON API binds container-private loopback. The backend uses a fixed
 Docker-exec client with fixed API paths; neither browser nor model can supply
 arbitrary commands, a container identity or a service endpoint. Ownership checks
-compare persisted workspace/launch labels and immutable image identity before
-control. Failed reconciliation retains the ownership receipt rather than acting
+compare persisted workspace/launch labels and reject unexpected host exposure
+before control. The immutable image identity is used during container creation.
+Failed reconciliation retains the ownership receipt rather than acting
 on an unverified container.
 
 Internal HTTP requests supply fixed `127.0.0.1` forwarding headers, and the local
@@ -219,6 +226,13 @@ addresses and headers are not forwarded. Readiness verifies the private HTTP
 health endpoint after ownership inspection; a running container alone is not
 treated as a usable search service. Status probes have short deadlines to avoid
 blocking the app's nginx proxy.
+
+An OS-backed exclusive manager lease is acquired before receipt reconciliation.
+A second app cannot control the live owner's service. Stop retains that lease;
+close joins startup/shutdown workers before releasing it, and OS process exit
+releases it automatically. Failed Docker cleanup preserves the exact receipt for
+later recovery. Stop runs in a pollable background worker; a browser request
+timeout or disconnect is not proof that cleanup did not run.
 
 The container drops capabilities, disallows privilege escalation and bounds
 memory, CPU and PIDs. Engine configuration selects only Bing, DuckDuckGo and/or
@@ -254,6 +268,18 @@ A hard parent crash can leave resources temporarily. Persisted ownership receipt
 allow reconciliation on a later startup, subject to OS/Docker reachability and
 identity checks. Browser close delivery is best effort; this is not an OS-level
 process or container watchdog guarantee.
+
+## Private local diagnostics
+
+Unexpected failures retain at most 100 local events: a generated reference ID,
+timestamp, allowlisted operation and allowlisted exception class. The private
+workspace's `diagnostics.json` uses atomic owner-only writes; the authenticated
+Local diagnostics view exposes these fields. If persistence fails, in-session
+events remain available. Request bodies, case contents, clues, URLs, search
+queries, credentials, exception messages and tracebacks are not recorded.
+Expected source blocks remain in normal per-action history. Proxy HTML is never
+rendered as an error description; the UI reports a safe HTTP status and advises
+checking operation status before retrying.
 
 ## Residual limits and reporting
 

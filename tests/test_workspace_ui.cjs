@@ -121,6 +121,41 @@ test('failed metasearch with an ownership receipt keeps Stop available for recov
   assert.equal(ui.elements.get('start-search-service').disabled, false);
 });
 
+test('HTML proxy failures and connection failures have useful local recovery guidance', async () => {
+  const ui = harness(); await new Promise(resolve => setImmediate(resolve));
+  ui.sandbox.fetch = async () => ({ok:false,status:504,json:async()=>{throw new SyntaxError('PRIVATE_PROXY_HTML');}});
+  await assert.rejects(ui.run("api('/api/test')"), error => /HTTP 504/.test(error.message) && /status before retrying/.test(error.message) && !/PRIVATE_PROXY_HTML/.test(error.message));
+  ui.sandbox.fetch = async () => { throw new TypeError('PRIVATE_NETWORK_DETAILS'); };
+  await assert.rejects(ui.run("api('/api/test')"), error => /local app/.test(error.message) && /start.sh/.test(error.message) && !/PRIVATE_NETWORK_DETAILS/.test(error.message));
+  ui.sandbox.fetch = async () => ({ok:false,status:400,json:async()=>({error:'Select a valid public URL.'})});
+  await assert.rejects(ui.run("api('/api/test')"), /Select a valid public URL/);
+});
+
+test('asynchronous Stop stays disabled while polling and exposes terminal cleanup state', async () => {
+  const ui = harness(); await new Promise(resolve => setImmediate(resolve));
+  const fallback = ui.sandbox.fetch;
+  ui.sandbox.fetch = async (url, options) => url === '/api/search-service/stop'
+    ? {ok:true,json:async()=>({state:'stopping',owned_container:true})} : fallback(url,options);
+  ui.run("renderSearchService({state:'ready',owned_container:true})");
+  await ui.elements.get('stop-search-service').fire('click');
+  assert.equal(ui.elements.get('stop-search-service').disabled,true);
+  assert.equal(ui.elements.get('start-search-service').disabled,true);
+  assert.equal(ui.timers.size,1);
+  ui.run("renderSearchService({state:'stopped',owned_container:false})");
+  assert.equal(ui.elements.get('start-search-service').disabled,false);
+  assert.equal(ui.elements.get('stop-search-service').hidden,true);
+  assert.equal(ui.timers.size,0);
+});
+
+test('local diagnostics exposes references using text without interpreting markup', async () => {
+  const ui = harness(); await new Promise(resolve => setImmediate(resolve));
+  const fallback = ui.sandbox.fetch;
+  ui.sandbox.fetch = async (url,options) => url === '/api/diagnostics' ? {ok:true,json:async()=>({events:[{id:'a'.repeat(32),at:'2026-10-16T12:00:00+00:00',operation:'http_request',exception:'RuntimeError'}],persistent:true})} : fallback(url,options);
+  await ui.elements.get('refresh-diagnostics').fire('click');
+  assert.match(ui.elements.get('diagnostic-events').textContent,/RuntimeError/);
+  assert.match(ui.elements.get('diagnostic-events').textContent,/a{32}/);
+});
+
 test('source configuration round trips approved public inputs and unlimited page-scoped mode', async () => {
   const ui = harness();
   await new Promise(resolve => setImmediate(resolve));

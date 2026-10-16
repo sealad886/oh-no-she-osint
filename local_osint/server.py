@@ -8,6 +8,7 @@ import re
 import secrets
 import socket
 import sqlite3
+import sys
 import threading
 import time
 from http.cookies import SimpleCookie, CookieError
@@ -21,6 +22,7 @@ from .investigation import Jobs
 from .ai import LocalAI
 from .workspace import Workspace
 from .search_service import SearchService
+from .diagnostics import Diagnostics
 
 STATIC = Path(__file__).parent / "static"
 MAX_REQUEST = 3 * 1024 * 1024
@@ -49,16 +51,21 @@ class LocalServer(ThreadingHTTPServer):
         self._watchdog = None
         self._close_lock = threading.Lock()
         self._runtime_closed = False
-        super().__init__(("127.0.0.1", port), Handler)
-        self.origin = f"http://127.0.0.1:{self.server_port}"
-        self.host = f"127.0.0.1:{self.server_port}"
-        self.ai = LocalAI(engine, model_path)
-        self.workspace = Workspace(engine)
-        self.search_service = SearchService(engine.directory)
-        self.jobs = Jobs(engine, allow_network, self.ai, self.search_service)
-        if shutdown_on_close:
-            self._watchdog = threading.Thread(target=self._watch_pages, name='osint-page-watchdog', daemon=True)
-            self._watchdog.start()
+        self.diagnostics = Diagnostics(engine.directory)
+        try:
+            super().__init__(("127.0.0.1", port), Handler)
+            self.origin = f"http://127.0.0.1:{self.server_port}"
+            self.host = f"127.0.0.1:{self.server_port}"
+            self.ai = LocalAI(engine, model_path)
+            self.workspace = Workspace(engine)
+            self.search_service = SearchService(engine.directory, diagnostics=self.diagnostics)
+            self.jobs = Jobs(engine, allow_network, self.ai, self.search_service, diagnostics=self.diagnostics)
+            if shutdown_on_close:
+                self._watchdog = threading.Thread(target=self._watch_pages, name='osint-page-watchdog', daemon=True)
+                self._watchdog.start()
+        except BaseException:
+            self.server_close()
+            raise
 
     def server_close(self):
         with self._close_lock:
@@ -78,7 +85,7 @@ class LocalServer(ThreadingHTTPServer):
             finally:
                 try:
                     if hasattr(self, 'search_service'):
-                        self.search_service.stop()
+                        self.search_service.close()
                 finally:
                     super().server_close()
 
@@ -153,8 +160,11 @@ class LocalServer(ThreadingHTTPServer):
             self.slots.release()
 
     def handle_error(self, request, client_address):
-        # No private request data or exception tracebacks in routine logs.
-        pass
+        error = sys.exception()
+        # A browser disconnect is expected during departure; unexpected failures
+        # retain only safe metadata, never request content or exception text.
+        if error and not isinstance(error, (BrokenPipeError, ConnectionResetError, TimeoutError)):
+            self.diagnostics.record('http_request', error)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -280,6 +290,9 @@ class Handler(BaseHTTPRequestHandler):
                         'search_service': service})
                 elif path == '/api/search-service':
                     self.reply(200, self.server.search_service.status())
+                elif path == '/api/diagnostics':
+                    self.reply(200, {'events': self.server.diagnostics.recent(),
+                                     'persistent': self.server.diagnostics.persistence_available})
                 elif path == '/api/workspace':
                     from .frontier import default_settings
                     with engine.connection() as db:
@@ -364,7 +377,7 @@ class Handler(BaseHTTPRequestHandler):
                         raise InvalidInput('Stop collection before changing the search service.')
                     self.reply(202, self.server.search_service.start_async(data.get('settings')))
                 elif path == '/api/search-service/stop':
-                    self.reply(200, self.server.search_service.stop())
+                    self.reply(202, self.server.search_service.stop_async())
                 elif path == "/api/investigate":
                     options = data.get('options')
                     if options is not None and not isinstance(options, dict):
@@ -409,3 +422,7 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(503, {"error": "Local storage unavailable. Check disk space and permissions."})
         except (TypeError, ValueError, OverflowError):
             self.reply(400, {"error": "Invalid request fields."})
+        except Exception as exc:
+            event = self.server.diagnostics.record('http_request', exc)
+            self.reply(500, {"error": "Local operation failed unexpectedly. Saved evidence is retained. See Local diagnostics. Reference " + event['id'],
+                             "diagnostic_id": event['id']})

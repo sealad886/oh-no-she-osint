@@ -11,6 +11,7 @@ from urllib.parse import urlsplit, unquote_plus
 
 from .engine import InvalidInput, field, now
 from .relevance import outbound_private_clues
+from .workspace import AUTOMATIC_ATTEMPT_LIMIT
 
 
 SOURCE_KEYS = {'packs', 'public_usernames', 'seed_urls', 'runtime_seconds', 'keep_working'}
@@ -232,6 +233,9 @@ class Frontier:
     def run_queue(self, recover=False, task_ids=None, max_actions=None):
         r = self.runner
         if recover:
+            if not getattr(r, '_recovered_transient_actions', False):
+                self.workspace.recover_transient_actions(self.case_id)
+                r._recovered_transient_actions = True
             for task in self.workspace.tasks(self.case_id):
                 historical = isinstance(task.get('result'), dict) and task['result'].get('historical_report_id')
                 if task['state'] == 'interrupted_after_dispatch' and not historical and (task_ids is None or task['id'] in task_ids):
@@ -241,7 +245,8 @@ class Frontier:
         while True:
             r.check()
             tasks = [x for x in self.workspace.tasks(self.case_id) if x['state'] == 'pending' or
-                     (x['state'] == 'cooldown' and x.get('retry_at') and x['retry_at'] <= now())]
+                     (x['state'] == 'cooldown' and x.get('retry_at') and x['retry_at'] <= now() and
+                      (x['attempts'] < AUTOMATIC_ATTEMPT_LIMIT or task_ids and x['id'] in task_ids))]
             if task_ids is not None:
                 tasks = [task for task in tasks if task['id'] in task_ids]
             cooling = {item['connector']: item for item in self.workspace.health(self.case_id)
@@ -252,9 +257,9 @@ class Frontier:
                     health = cooling[health_key]
                     self.workspace.defer_action(self.case_id, task['id'], health['retry_at'], health.get('error'))
             tasks = [task for task in tasks if ('web_search:' + task['arguments'].get('provider', r.active_provider) if task['connector'] == 'web_search' else task['connector']) not in cooling]
-            if r.page_count() >= r.options['page_limit']:
-                tasks = [task for task in tasks if task['connector'] != 'collect_page']
             approvals = self.workspace.settings(self.case_id).get('approved_actions', [])
+            if r.page_count() >= r.options['page_limit']:
+                tasks = [task for task in tasks if task['connector'] != 'collect_page' or task['id'] in approvals]
             legacy = {'web_search': 'web_search', 'search_subject': 'wikidata', 'news_search': 'news', 'domain_signals': 'domain'}
             permitted = set(r.options['packs']) | {'collect_page'} | {tool for tool, source in legacy.items() if source in r.options['tools']}
             if r.options.get('automatic'):
@@ -277,7 +282,7 @@ class Frontier:
             r._queue_task = task
             try:
                 if task['connector'] == 'collect_page':
-                    r.page(args['url'])
+                    r.page(args['url'], explicit=explicit)
                 elif task['connector'] == 'web_search':
                     r.web_search(args['query'], args.get('provider'))
                 elif task['connector'] == 'search_subject':

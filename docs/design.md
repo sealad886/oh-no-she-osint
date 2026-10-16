@@ -48,6 +48,7 @@ flowchart LR
 | `investigation.py` | Existing discovery, provider recovery, useful-page accounting, budgets, job control and AI integration |
 | `ai.py`, `prompts.py` | Owned cached-model runtime, bounded action/extraction/draft requests and eight configurable prompt stages |
 | `search_service.py` | Explicit official-image setup and ownership-scoped SearXNG lifecycle |
+| `diagnostics.py`, `private_files.py` | Bounded metadata-only failure references and shared private atomic JSON writes |
 | `owned_process.py`, `nginx.py`, `server.py` | Owned-process receipts, loopback proxy/API, authentication and page leases |
 | `static/` | Source configuration, run controls, visible queue/tool outcomes, candidate observations and evidence inspection |
 
@@ -116,6 +117,16 @@ completion records outcome afterward. A hard crash between them leaves an unknow
 remote outcome. Resume can repeat read-only requests and preserves the prior
 attempt. No distributed exactly-once guarantee is possible. Cooldown/connector
 health survives restart and retry cannot erase an active rate-limit deadline.
+
+Explicit approval is carried through the shared dispatcher to the exact action
+inputs. An approved page retry bypasses that attempt's cached result without
+discarding originals or previous receipts. Automatic continuation continues to
+avoid attempted pages. Recovery of saved transient failures is restricted to
+eligible search connectors, excludes imported historical tasks and retains a
+three-attempt automatic ceiling. Transient failures wait 60 seconds, rate limits
+300 seconds, and any later connector-health deadline still controls dispatch.
+Run budgets and time limits apply to retries. Cooling work remains saved for a
+later explicit Resume/Continue rather than causing an unbounded waiting loop.
 
 Request ceilings, useful-page goals, Stop and per-request bounds operate separately
 from elapsed runtime. The page goal limits page collection but cannot declare questions answered or
@@ -243,10 +254,38 @@ trust boundary is explicit in the UI/security documentation. Returned pages stil
 use the core collector. Native image startup and engine reliability require
 separate qualification; a mocked Docker lifecycle is not equivalent evidence.
 
-Ownership receipts support reconciliation after parent death. Control/cleanup
-requires matching ownership and image identity; uncertain ownership is retained
-for recovery. Normal final-page closure stops owned search/model/nginx/backend;
-crash cleanup remains subject to lease expiry, OS and Docker availability.
+SearchService acquires an OS-backed exclusive `search-service/manager.lock`
+before loading or reconciling its ownership receipt. A second manager cannot
+inspect or stop the live owner's container. The manager holds this lease through
+Stop and releases it only after close joins its workers; OS process exit also
+releases it. Initialization failures release acquired resources. A later owner
+can reconcile the exact persisted receipt using matching workspace/launch labels
+and host-exposure checks; uncertain ownership is retained for recovery.
+
+Start and Stop return accepted background-operation snapshots. A separate stop
+worker cancels and joins the original startup worker before cleanup, preserving
+startup identity for cancellation. Status remains pollable through stopping,
+stopped or error without tying Docker cleanup to nginx's request timeout.
+Repeated Stop requests share the active operation. App close waits for cleanup
+and releases its manager lease even when Docker is unavailable, retaining the
+receipt for the next launch. Normal final-page closure stops owned
+search/model/nginx/backend; crash reconciliation remains subject to OS and Docker
+availability.
+
+## Local failure diagnostics
+
+Unexpected HTTP, investigation and background-service exceptions use one bounded
+local recorder. Events contain only a generated reference ID, timestamp,
+allowlisted operation and allowlisted exception class. The last 100 events are
+atomically saved with owner-only permissions in `diagnostics.json`; persistence
+failure leaves in-session events available. The authenticated API and Local
+diagnostics panel expose these metadata, never exception text or request inputs.
+Expected collection blocks retain their normal per-action outcomes.
+
+The shared frontend API client catches connection failures and non-JSON proxy
+responses, presents a safe HTTP-status/recovery message and preserves meaningful
+JSON validation errors. It does not interpret proxy HTML as service state or
+assume that a disconnected request failed before dispatch.
 
 ## Upgrade and rollback
 

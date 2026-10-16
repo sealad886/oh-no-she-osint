@@ -15,7 +15,8 @@ from .engine import InvalidInput, now, field
 from .page_quality import assess_page
 from .relevance import local_match, rank_key, words, outbound_private_clues
 from .prompts import validate_prompts
-from .workspace import Workspace
+from .workspace import (Workspace, AUTOMATIC_ATTEMPT_LIMIT, TRANSIENT_RETRY_SECONDS, RATE_LIMIT_RETRY_SECONDS,
+                        RECOVERABLE_SEARCH_CONNECTORS, transient_source_failure)
 
 REPORT_SOURCE = 'local-osint:investigation-report'
 PROPERTIES = {'P31': 'Type', 'P856': 'Official website (candidate claim)', 'P17': 'Country',
@@ -122,7 +123,7 @@ class Halt(Exception):
 
 
 class Investigation:
-    def __init__(self, engine, case_id, enabled=False, progress=None, cancel=None, ai=None, run_id=None, deadline_seconds=300, options=None, previous=None, local_only=False, continuing=False, search_service=None):
+    def __init__(self, engine, case_id, enabled=False, progress=None, cancel=None, ai=None, run_id=None, deadline_seconds=300, options=None, previous=None, local_only=False, continuing=False, search_service=None, diagnostics=None):
         if not enabled and not local_only:
             raise InvalidInput('Investigation collection is off. Restart with --allow-network.')
         with engine.connection() as db:
@@ -138,6 +139,8 @@ class Investigation:
         self.pages, self.domains = {}, {}
         self.failed_providers = set()
         self.workspace = Workspace(engine)
+        from .diagnostics import Diagnostics
+        self.diagnostics = diagnostics if diagnostics is not None else Diagnostics(engine.directory)
         self.search_service = search_service
         self._queue_task = None
         self.active_provider = self.options['providers'][0]
@@ -234,6 +237,7 @@ class Investigation:
         self.report['active_tool'] = entry['id']
         self.publish(label)
         result = None
+        retryable = False
         try:
             result = callback()
             self.remember(result)
@@ -244,10 +248,14 @@ class Investigation:
                 entry['source_id'] = result['id']
             if result.get('_action_status') in {'blocked', 'rate_limited', 'uninterpretable', 'error'}:
                 entry.update(ok=False, status='failed', error=result.get('summary', 'Source tool unavailable.'))
+                outcome = result.get('_outcome') or {}
+                retryable = result['_action_status'] == 'rate_limited' or (
+                    result['_action_status'] == 'error' and transient_source_failure(entry['error'], outcome.get('http_status')))
             return result
         except (InvalidInput, OSError, http.client.HTTPException, ValueError, KeyError, TypeError, RecursionError) as exc:
             entry['error'] = str(exc) if isinstance(exc, InvalidInput) else 'Source unavailable or response could not be interpreted.'
             entry['status'] = 'failed'
+            retryable = isinstance(exc, (OSError, http.client.HTTPException)) or transient_source_failure(entry['error'])
             if getattr(exc, 'evidence_id', None):
                 self.remember({'id': exc.evidence_id})
                 entry['source_id'] = exc.evidence_id
@@ -259,14 +267,14 @@ class Investigation:
             if task:
                 action_status = (result or {}).get('_action_status')
                 retry = None
-                if action_status == 'rate_limited':
+                if retryable and (tool in RECOVERABLE_SEARCH_CONNECTORS or action_status == 'rate_limited') and task['attempts'] < AUTOMATIC_ATTEMPT_LIMIT:
                     from datetime import datetime, timedelta, timezone
-                    retry = (datetime.now(timezone.utc) + timedelta(seconds=300)).isoformat()
+                    retry = (datetime.now(timezone.utc) + timedelta(seconds=RATE_LIMIT_RETRY_SECONDS if action_status == 'rate_limited' or 'HTTP 429' in entry.get('error', '') else TRANSIENT_RETRY_SECONDS)).isoformat()
                 finished_state = ('cooldown' if retry else 'blocked' if action_status in {'blocked', 'uninterpretable'} else
                     'complete' if entry.get('ok') else 'interrupted_after_dispatch' if entry['status'] == 'cancelled' else 'failed')
                 self.workspace.finish_action(self.case_id, task['id'],
                     finished_state,
-                    result=(result or {}).get('_outcome') or {'summary': entry.get('result_summary', ''), 'duration_ms': entry['duration_ms']},
+                    result={**((result or {}).get('_outcome') or {'summary': entry.get('result_summary', ''), 'duration_ms': entry['duration_ms']}), 'retryable': retryable},
                     evidence_ids=(result or {}).get('_evidence_ids') or ([entry['source_id']] if entry.get('source_id') else []),
                     error=entry.get('error'), retry_at=retry)
             self.report['active_tool'] = None
@@ -351,8 +359,11 @@ class Investigation:
             return {**result, 'results': current_results}
         self.failed_providers.add(provider)
         from datetime import datetime, timedelta, timezone
+        failed_task = next((task for task in self.workspace.tasks(self.case_id)
+                            if task['id'] == self.report['steps'][-1].get('task_id')), {})
+        retry_at = failed_task.get('retry_at') or (datetime.now(timezone.utc) + timedelta(seconds=TRANSIENT_RETRY_SECONDS)).isoformat()
         self.workspace.update_health(self.case_id, 'web_search:' + provider, 'unavailable',
-            retry_at=(datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat(),
+            retry_at=retry_at,
             error='Public search provider unavailable; use another provider while this one cools down.')
         return {'error': 'Web search unavailable. See its tool activity and retry.', 'results': []}
 
@@ -412,16 +423,16 @@ class Investigation:
             batch = eligible[offset:offset + 10]
             self.step('Local AI: assess collected pages against target context', lambda batch=batch: compare(batch), 0, 'analyze', {})
 
-    def page(self, url):
+    def page(self, url, explicit=False):
         if not self.enabled:
             raise InvalidInput('Web collection is off for this app session.')
         from .frontier import Frontier
-        Frontier(self).guard('collect_page', {'url': url})
-        if url not in self.allowed_urls:
+        Frontier(self).guard('collect_page', {'url': url}, explicit=explicit)
+        if not explicit and url not in self.allowed_urls:
             raise InvalidInput('Only URLs discovered for this investigation may be collected.')
-        if url in self.pages:
+        if url in self.pages and not explicit:
             return self.cached_tool('Reuse page result: ' + url, self.pages[url], 'collect_page', {'url': url})
-        if self.page_count() >= self.options['page_limit']:
+        if not explicit and self.page_count() >= self.options['page_limit']:
             raise InvalidInput('Page limit reached. Increase it for the next investigation or run this page tool yourself.')
         def collect_page():
             saved = collector.collect(self.engine, self.case_id, url, True, allow_query=True)
@@ -998,7 +1009,7 @@ class Investigation:
             url = field(args['url'], 'Public page URL', 2000)
             collector.public_url(url, allow_query=True)
             self.allowed_urls.add(url)
-            return self.page(url)
+            return self.page(url, explicit=True)
         if name == 'domain_signals' and set(args) == {'domain', 'signals'}:
             domain = collector.domain_name(args['domain'])
             signals = args['signals']
@@ -1045,9 +1056,10 @@ class Investigation:
             self.report['status'] = 'partial' if self.report['source_ids'] else 'failed'
             self.report['error'] = str(exc)
             self.report['stop_reason'] = str(exc)
-        except Exception:
+        except Exception as exc:
             self.report['status'] = 'partial' if self.report['source_ids'] else 'failed'
-            self.report['error'] = 'Investigation stopped unexpectedly. Collected evidence is retained.'
+            event = self.diagnostics.record('investigation', exc)
+            self.report['error'] = 'Investigation stopped unexpectedly. Collected evidence is retained. Reference: ' + event['id'] + '.'
             self.report['stop_reason'] = self.report['error']
         finally:
             if getattr(self, 'controller', None):
@@ -1064,9 +1076,11 @@ def save_report(engine, report):
 
 class Jobs:
     """One owned worker; persisted checkpoints survive restart without resuming traffic."""
-    def __init__(self, engine, enabled=False, ai=None, search_service=None):
+    def __init__(self, engine, enabled=False, ai=None, search_service=None, diagnostics=None):
         self.engine, self.enabled, self.ai = engine, enabled, ai
         self.search_service = search_service
+        from .diagnostics import Diagnostics
+        self.diagnostics = diagnostics if diagnostics is not None else Diagnostics(engine.directory)
         self.workspace = Workspace(engine)
         from .owned_process import WorkerLease
         self.lease = WorkerLease(engine.directory)
@@ -1123,7 +1137,7 @@ class Jobs:
                 runner = Investigation(self.engine, case_id, self.enabled, progress, self.cancel, selected_ai, run_id,
                                        options=selected_options, previous=previous,
                                        local_only=bool(action and action['tool'] in {'read_evidence', 'analyze', 'email_headers', 'resume_queue'}),
-                                       continuing=continuing, search_service=self.search_service)
+                                       continuing=continuing, search_service=self.search_service, diagnostics=self.diagnostics)
             except BaseException:
                 self.lease.release()
                 raise
