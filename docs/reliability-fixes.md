@@ -1,6 +1,7 @@
 # Recovery and runtime reliability fixes
 
-Status: design accepted for implementation by the 2026-10-16 request. Baseline:
+Status: implemented, qualified, independently reviewed and integrated locally
+into main on 2026-10-16, following the user's local-only instruction. Baseline:
 `609d433` on `codex/local-osint-engine`. Existing cases and evidence are immutable
 inputs to this work. No schema migration or dependency installation is needed.
 
@@ -56,8 +57,9 @@ logging is introduced. Upstream 403/429/999 blocks are not bypassed.
 - [x] Implement R5/R6 and R7, update user/operator documentation.
 - [x] Finish browser qualification; Python/UI/native nginx/Docker checks passed.
 - [x] Commit coherent slices; complete available independent review/fix rounds.
-- [ ] Verify GitHub identity, configured reviewer/CI and remote merge gates (blocked).
-- [ ] Merge into verified main, verify destination and clean up eligible task refs.
+- [x] Resolve integration scope: user selected local only; GitHub gates do not apply.
+- [x] Fast-forward local main to the reviewed changes and verify destination.
+- [x] Retire the fully merged local task branch after verifying ancestry.
 
 The primary agent owns integration, server/UI/diagnostics and handoff. A bounded
 recovery implementer owns investigation/frontier/workspace and its regressions;
@@ -72,11 +74,11 @@ approval boundaries, completed originals, attempt history and container receipts
 Exercise cancellation and constructor failure explicitly. Test with synthetic
 cases and owned temporary services; record real-provider proof separately.
 
-The repository currently has no remote or main branch. GitHub destination is a
-pending user input; no private source will be sent to an invented destination.
-Implementation/review can proceed locally. PR creation, configured reviewer/CI
-discovery and remote merge await that identity. Independent Codex review is the
-available local review source; no third-party review export is required.
+The user selected local-only integration. The repository has no remote; GitHub
+PRs, configured remote reviewers and CI are outside the final delivery scope.
+Independent Codex review supplied the completed review source. Local main was
+created from baseline `609d433` and fast-forwarded to `d44f81b`, retaining all
+project history. No source was published or exported to a third-party reviewer.
 
 Rollback is a normal revert of the focused fix commits. There is no data schema
 conversion. Release of OS ownership permits the prior service manager to start;
@@ -89,7 +91,7 @@ Codanna 0.16.0 is indexed for this exact checkout; graphify and direct source
 inspection locate callers, sibling paths and public boundaries. Each fix must
 cover the local defect, regional siblings (manual tools/queue/Continue and
 start/stop/close), and global shared callers before being considered isolated.
-Current review and qualification receipts will be added here before integration.
+Completed review and qualification receipts follow below.
 
 | Cluster | Pattern search and repair boundary | Verification |
 | --- | --- | --- |
@@ -115,6 +117,7 @@ Local commits:
 
 - `0a20b92 test: close SQLite connections explicitly`
 - `77b5524 fix: recover investigations and own service lifecycles safely`
+- `d44f81b docs: record reliability qualification and review outcomes`
 
 Configured available source: independent Codex review, separate reviewer context,
 read-only pinned range. Review authority: explicit user invocation of
@@ -130,15 +133,14 @@ and handoff documentation follows the reviewed implementation commit. The saved
 report distinguishes its focused checks from the primary agent's full-suite,
 native Docker/nginx and browser evidence.
 
-Integration is blocked on GitHub repository identity. The checkout has no remote,
-upstream, PR, main branch or remote merge/check receipts. The user has been asked
-for its URL (or a local-only instruction). Do not invent a remote, create a hosted
-repository, infer configured reviewers, or claim PR/merge completion. Once the
-destination is supplied, inspect its history/default branch and PR template,
-publish only the authorized task branch, attach the PR, discover/request actual
-configured reviewers, satisfy required CI/approval/conflict gates, merge against
-the verified head, and verify main/eligible cleanup. Existing local task history
-must remain reachable.
+The user's local-only reply resolved the former GitHub identity blocker. On a
+clean checkout, local main was created at `609d433` and fast-forwarded to
+`d44f81b82f75648dd575112d44aefe4c2fe9a058`. The merged source and tests are
+identical to reviewed head `77b5524`; only qualification/handoff documentation
+follows it. All task history remains reachable from main. The fully merged
+`codex/local-osint-engine` branch was deleted after verifying ancestry; main is
+the only remaining local branch and the primary checkout remains in place.
+No remote, upstream, PR, hosted checks, release or deployment was created.
 
 The observed reliability failures were boundary failures: approval lost between
 two guards, durable failed tasks never reactivated, manager ownership narrower

@@ -49,10 +49,13 @@ target.
 Independent Codex review round 1 completed with **no actionable findings** for
 `609d433..77b5524`. The reviewer independently reran **58 focused Python tests**
 with ResourceWarnings treated as errors, plus all **28 UI tests**. The round
-ledger and integration blocker are in [the plan](reliability-fixes.md).
+ledger and integration outcome are in [the plan](reliability-fixes.md).
 Only qualification/handoff documentation changed after that reviewed head.
-GitHub CI, configured reviewers, PR and main-merge checks remain unrun because
-the checkout has no remote or main branch and its destination is unresolved.
+The user then selected local-only integration. Local main was created from
+baseline `609d433` and fast-forwarded to `d44f81b` on a clean checkout, preserving
+the reviewed source/tests exactly and retaining project history. GitHub CI,
+configured reviewers and a PR do not apply to that final scope; no remote or
+publication was created.
 Historical counts/provider results below describe their dated revisions. Real
 upstream availability and target relevance remain independent of these proofs.
 
