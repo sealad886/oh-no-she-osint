@@ -275,8 +275,9 @@ class Handler(BaseHTTPRequestHandler):
                     self.reply(200, engine.cases())
                 elif path == '/api/connectors':
                     from .connectors import catalogue
-                    self.reply(200, {'connectors': catalogue({'search_service': self.server.search_service}),
-                        'search_service': self.server.search_service.status()})
+                    service = self.server.search_service.status()
+                    self.reply(200, {'connectors': catalogue({'search_service': self.server.search_service}, service_status=service),
+                        'search_service': service})
                 elif path == '/api/search-service':
                     self.reply(200, self.server.search_service.status())
                 elif path == '/api/workspace':

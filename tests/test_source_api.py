@@ -74,6 +74,15 @@ class SourceAPIJourneyTests(unittest.TestCase):
         self.assertEqual(after, before)
         self.assertEqual(self.engine.evidence(self.case, saved['id'])['sha256'], hashlib.sha256(b'Existing public evidence').hexdigest())
 
+    def test_catalogue_and_service_use_a_consistent_readiness_observation(self):
+        # Docker can change state between probes; one response must not show
+        # an enabled tool alongside an unhealthy service panel.
+        with patch.object(self.server.search_service, 'status', side_effect=[{'state': 'ready'}, {'state': 'unhealthy'}]):
+            code, result = self.request('/api/connectors')
+        self.assertEqual(code, 200)
+        connector = next(item for item in result['connectors'] if item['id'] == 'searxng')
+        self.assertEqual(connector['available'], result['search_service']['state'] == 'ready')
+
     def test_configuration_source_run_resume_and_export_preserve_originals(self):
         home = b'<h1>Community club</h1><p>Public information about our community activities, volunteer programmes and upcoming events.</p><a href="/volunteers">Volunteers</a>'
         profile = b'<h1>Bea Public</h1><p>Bea Public organizes community events and volunteer training at this local organization. This is a public staff introduction.</p>'

@@ -30,9 +30,9 @@ LABEL_NONCE = "org.local-osint.launch"
 PYTHON = "/usr/local/searxng/.venv/bin/python"
 HTTP_CLIENT = """import base64,http.client,json,sys
 d=json.load(sys.stdin)
-c=http.client.HTTPConnection('127.0.0.1',8080,timeout=25)
+c=http.client.HTTPConnection('127.0.0.1',8080,timeout=d.get('timeout',25))
 try:
- c.request(d['method'],d['path'],body=d.get('body'),headers={'Content-Type':'application/x-www-form-urlencoded','Accept-Encoding':'identity'})
+ c.request(d['method'],d['path'],body=d.get('body'),headers={'Content-Type':'application/x-www-form-urlencoded','Accept-Encoding':'identity','X-Forwarded-For':'127.0.0.1','X-Real-IP':'127.0.0.1'})
  r=c.getresponse(); b=r.read(2097153)
  if len(b)>2097152: raise ValueError('Response exceeded limit')
  print(json.dumps({'status':r.status,'body':base64.b64encode(b).decode('ascii')}))
@@ -99,6 +99,10 @@ class SearchService:
         if not self.binary:
             raise InvalidInput("Docker is unavailable. Install and start Docker separately, then reopen the app.")
         process = None
+        operation = {"info": "Docker connection check", "pull": "image download", "image": "image inspection",
+                     "create": "container creation", "cp": "configuration copy", "start": "container startup",
+                     "exec": "private HTTP request", "container": "container inspection", "stop": "container stop",
+                     "rm": "container cleanup"}.get(arguments[0], "container operation")
         try:
             process = subprocess.Popen([self.binary, *arguments], stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
@@ -117,10 +121,11 @@ class SearchService:
                 except subprocess.TimeoutExpired:
                     first = False
             if process.returncode:
-                raise InvalidInput("Container operation failed. Check Docker availability, image compatibility and free disk space.")
+                raise InvalidInput(f"Search service {operation} failed. Check Docker availability, image compatibility and free disk space.")
             return stdout
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise InvalidInput("Container operation failed or timed out. Check that Docker is running.") from exc
+            outcome = "timed out" if isinstance(exc, subprocess.TimeoutExpired) else "could not run"
+            raise InvalidInput(f"Search service {operation} {outcome}. Check Docker connectivity; retry setup if the image download was interrupted.") from exc
         finally:
             if process is not None and process.poll() is None:
                 self._terminate_command(process)
@@ -152,12 +157,12 @@ class SearchService:
             self._check_cancelled()
             raise InvalidInput("Cannot connect to Docker. Start Docker Desktop or your Docker engine, wait until it is ready, then retry Set up & start metasearch. If Docker is already running, check its connection and permissions.") from exc
 
-    def _inspect_owned(self, cancellable=True):
+    def _inspect_owned(self, cancellable=True, timeout=5):
         container, nonce = self.state.get("container"), self.state.get("nonce")
         if not isinstance(container, str) or not re.fullmatch(r"osint-search-[a-f0-9]{24}-[a-f0-9]{16}", container) or not isinstance(nonce, str):
             return None
         try:
-            records = json.loads(self._run(["container", "inspect", container], timeout=5, cancellable=cancellable))
+            records = json.loads(self._run(["container", "inspect", container], timeout=timeout, cancellable=cancellable))
         except (InvalidInput, ValueError, TypeError):
             return None
         if not isinstance(records, list) or len(records) != 1:
@@ -176,8 +181,17 @@ class SearchService:
         if not self.lock.acquire(blocking=False):
             return self._snapshot(self.phase or "busy")
         try:
-            record = self._inspect_owned() if self.state.get("container") else None
-            ready = bool(record and record.get("State", {}).get("Running"))
+            record = self._inspect_owned(timeout=2) if self.state.get("container") else None
+            ready = False
+            if record and record.get("State", {}).get("Running"):
+                try:
+                    # Keep status below nginx's request timeout; ownership was
+                    # just verified, so no second container inspection is needed.
+                    ready = self._request("GET", "/healthz", timeout=2)["status"] == 200
+                except InvalidInput:
+                    pass
+            if record and not ready and not self.last_error:
+                return self._snapshot("unhealthy")
             return self._snapshot("ready" if ready else "error" if self.last_error else "stopped" if self.state.get("image_id") else "unavailable" if not self.binary else "not_configured")
         finally:
             self.lock.release()
@@ -186,7 +200,8 @@ class SearchService:
         messages = {"setting_up": "Preparing and pinning the official search image. This may take several minutes.",
                     "preparing": "Preparing the owned local search service in the background.",
                     "starting": "Starting the owned local search service.", "stopping": "Stopping the owned local search service.",
-                    "ready": "Owned search service ready; HTTP is private to the container."}
+                    "ready": "Owned search service ready; HTTP is private to the container.",
+                    "unhealthy": "SearXNG is not responding. Use Stop metasearch, then Set up & start metasearch to retry."}
         return {"state": state, "message": messages.get(state, self.message), "error": self.last_error,
                 "configured": bool(self.state.get("image_id")), "image": self.state.get("image", DEFAULT_IMAGE),
                 "owned_container": bool(self.state.get("container")),
@@ -262,8 +277,17 @@ class SearchService:
             else:
                 self._check_docker()
             self._check_cancelled()
-            if self._inspect_owned():
-                return self.status()
+            existing = self._inspect_owned()
+            if existing:
+                if not existing.get("State", {}).get("Running"):
+                    raise InvalidInput("The owned search container is stopped. Use Stop metasearch, then Set up & start metasearch to retry.")
+                try:
+                    healthy = self._request("GET", "/healthz", timeout=2)["status"] == 200
+                except InvalidInput:
+                    healthy = False
+                if not healthy:
+                    raise InvalidInput("SearXNG is not responding. Use Stop metasearch, then Set up & start metasearch to retry.")
+                return self._snapshot("ready")
             if self.state.get("container"):
                 raise InvalidInput("Previous search service ownership could not be verified. Start Docker and stop/reconcile it before restarting.")
             if not re.fullmatch(r"sha256:[a-f0-9]{64}", self.state.get("image_id", "")):
@@ -308,19 +332,26 @@ class SearchService:
     def _configuration_archive(config):
         import io
         import tarfile
-        content = json.dumps(config).encode()  # JSON is a YAML subset accepted by SearXNG.
+        files = {"settings.yml": json.dumps(config).encode(),  # JSON is a YAML subset accepted by SearXNG.
+                 "limiter.toml": b'# Only the app gateway on container loopback supplies forwarding headers.\n[botdetection]\ntrusted_proxies = ["127.0.0.1/32"]\n'}
         output = io.BytesIO()
         with tarfile.open(fileobj=output, mode="w") as archive:
-            member = tarfile.TarInfo("settings.yml")
-            member.size, member.mode, member.uid, member.gid = len(content), 0o600, 977, 977
-            archive.addfile(member, io.BytesIO(content))
+            for name, content in files.items():
+                member = tarfile.TarInfo(name)
+                member.size, member.mode, member.uid, member.gid = len(content), 0o600, 977, 977
+                archive.addfile(member, io.BytesIO(content))
         return output.getvalue()
 
     def _http(self, method, path, body=None):
         if not self._inspect_owned():
             raise InvalidInput("The owned search service is unavailable. Start it in Sources.")
+        return self._request(method, path, body)
+
+    def _request(self, method, path, body=None, timeout=35):
+        """Fixed gateway request after the caller verifies container ownership."""
         raw = self._run(["exec", "-i", self.state["container"], PYTHON, "-c", HTTP_CLIENT],
-                        input=json.dumps({"method": method, "path": path, "body": body}).encode(), timeout=35)
+                        input=json.dumps({"method": method, "path": path, "body": body,
+                                          "timeout": min(25, max(0.1, timeout - 1))}).encode(), timeout=timeout)
         try:
             data = json.loads(raw)
             payload = base64.b64decode(data["body"], validate=True)

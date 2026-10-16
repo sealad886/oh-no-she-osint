@@ -70,7 +70,7 @@ REGISTRY = {
 }
 
 
-def catalogue(settings=None):
+def catalogue(settings=None, *, service_status=None):
     settings = settings or {}
     service = settings.get("search_service")
     result = []
@@ -78,7 +78,7 @@ def catalogue(settings=None):
         entry = json.loads(json.dumps(item))
         entry.update({"available": True, "availability": "ready"})
         if entry["id"] == "searxng":
-            state = service.status() if service else {"state": "unavailable", "message": "Set up the optional local search service in Sources."}
+            state = service_status if service_status is not None else service.status() if service else {"state": "unavailable", "message": "Set up the optional local search service in Sources."}
             entry.update({"available": state.get("state") == "ready", "availability": state.get("state", "unavailable"), "availability_message": state.get("message", ""), "service": state})
         result.append(entry)
     return result

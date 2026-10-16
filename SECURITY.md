@@ -213,6 +213,13 @@ compare persisted workspace/launch labels and immutable image identity before
 control. Failed reconciliation retains the ownership receipt rather than acting
 on an unverified container.
 
+Internal HTTP requests supply fixed `127.0.0.1` forwarding headers, and the local
+limiter configuration trusts only that loopback address. Browser-supplied client
+addresses and headers are not forwarded. Readiness verifies the private HTTP
+health endpoint after ownership inspection; a running container alone is not
+treated as a usable search service. Status probes have short deadlines to avoid
+blocking the app's nginx proxy.
+
 The container drops capabilities, disallows privilege escalation and bounds
 memory, CPU and PIDs. Engine configuration selects only Bing, DuckDuckGo and/or
 Brave; outgoing timeouts are bounded and HTTP retries disabled. JSON search
@@ -225,6 +232,11 @@ selected search engines. Docker access is a privileged host capability, and the
 third-party image is an additional trust/dependency boundary. Resource settings
 and a private API do not imply complete network isolation. Direct collection of
 returned pages still uses the core pinned transport.
+
+The upstream image can also download public ClearURLs tracker rules during
+startup, trying its CDN and mirror hosts with bounded requests. Those static
+downloads contain no case query, but expose ordinary connection metadata and
+can time out independently of local service health.
 
 See [validation status](docs/validation.md) for actual native-container qualification;
 mocked Docker tests do not prove an image starts or real engines return results.

@@ -293,6 +293,24 @@ If Docker is already running, check its connection and permissions. Progress and
 errors update automatically, and **Stop metasearch** can cancel an active setup.
 Your saved cases, evidence and pinned image settings survive a failed start.
 
+The app checks SearXNG's private HTTP health endpoint before reporting it ready.
+A running Docker container alone is not enough. Setup errors identify the failed
+stage, such as image download, configuration copy or container startup. If the
+container is unhealthy, use **Stop metasearch**, then **Set up & start metasearch**.
+
+SearXNG's Docker logs can also show upstream warnings while local search works:
+
+- A tracker-rule download timeout means a remote rules source was slow; SearXNG
+  tries its other mirrors. It does not by itself mean startup failed.
+- Brave's “Too many requests” means that external engine temporarily rate-limited
+  searches. Other engines can still return results; inspect the action's upstream
+  failures, wait for the cooldown or deselect Brave in metasearch setup options.
+
+The private gateway supplies a fixed loopback client identity and a matching local
+limiter configuration. It does not forward the browser's IP or arbitrary headers.
+This removes the missing-forwarding-header error and missing-limiter-file warning.
+nginx serves the browser app; the backend reaches SearXNG through Docker directly.
+
 No host port is published. A fixed Docker-exec client contacts container-private
 loopback; the browser cannot choose another metasearch endpoint. The container
 has no host bind mounts or Docker socket, drops capabilities and applies bounded

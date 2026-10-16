@@ -1,5 +1,40 @@
 # Validation evidence
 
+## Native SearXNG gateway and readiness — 2026-10-16
+
+Fixed the internal gateway's missing forwarding headers and supplied a minimal
+loopback-only limiter configuration. Added HTTP readiness checks, actionable
+unhealthy-container recovery and stage-specific setup errors. The source catalogue
+and service panel now share one readiness observation per API response.
+
+- **349 Python tests passed in 42.914 seconds**; focused service/API/connector/nginx
+  coverage passed **53 tests**. The existing nonfatal SQLite ResourceWarnings
+  remain outside this fix.
+- **25 UI controller tests passed**; JavaScript syntax, Python compilation,
+  whitespace checks and independent diff review passed.
+- A real browser started the official image through the nginx-backed app and ran
+  a public SearXNG query. It returned results, with Brave's upstream rate limit
+  recorded separately. The initial missing-header log was reproduced.
+- After the fix, a native authenticated nginx → app → Docker → SearXNG journey
+  accepted setup in **0.005 seconds**, reached HTTP-verified ready, completed a
+  real public search and stopped the container through nginx. Fresh logs contained
+  **zero missing-header errors and zero missing-limiter-file warnings**. A saved
+  synthetic original retained its SHA-256. Only isolated test workspaces were used.
+- Direct native search after the header fix returned HTTP 200 and **16 results**;
+  Brave reported “too many requests.” This is partial upstream coverage, not a
+  local startup failure or proof of relevance for every result.
+- Official Linux/arm64 image used:
+  `sha256:b4e34a39f76b1c860bbc53a0f35b10492029b2b18ef1d868df464fe43d7e0b93`.
+  The image was downloaded during explicit qualification; test-owned containers
+  and nginx stopped afterward. Docker itself remained running.
+
+The user-visible error in Brave was inspected through desktop accessibility.
+The Brave extension connection failed before tab access, and Docker Desktop's
+window inspection timed out; CLI and native HTTP checks supplied Docker/runtime
+evidence. No Docker Desktop settings were changed. Upstream tracker-rule mirror
+timeouts and search-provider cooldowns remain possible and are documented in
+the README.
+
 ## Docker-unavailable metasearch startup — 2026-10-16
 
 The service now reports an explicit error when its Docker engine check fails,

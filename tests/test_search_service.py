@@ -8,6 +8,7 @@ import tempfile
 import tarfile
 import threading
 import time
+import tomllib
 import unittest
 from unittest.mock import patch
 
@@ -82,6 +83,9 @@ class SearchServiceTests(unittest.TestCase):
             payload = next(body for args, body in self.calls if args[0] == "cp")
             with tarfile.open(fileobj=io.BytesIO(payload)) as archive:
                 config = json.load(archive.extractfile("settings.yml"))
+                limiter = tomllib.loads(archive.extractfile("limiter.toml").read().decode())
+                self.assertEqual(limiter['botdetection']['trusted_proxies'], ['127.0.0.1/32'])
+                self.assertTrue(all((file.mode, file.uid, file.gid) == (0o600, 977, 977) for file in archive.getmembers()))
             self.assertEqual(config["search"]["formats"], ["json"])
             self.assertEqual(config["use_default_settings"]["engines"]["keep_only"], ["bing", "duckduckgo"])
             self.manager.stop()
@@ -166,6 +170,41 @@ class SearchServiceTests(unittest.TestCase):
         self.assertNotEqual(result["state"], "ready")
         self.assertIn("Docker", result["error"])
 
+    def test_running_container_without_http_service_is_not_ready(self):
+        with patch.object(self.manager, "_run", side_effect=self.fake_runtime):
+            self.manager.setup()
+            self.manager.start()
+            def unavailable(args, **kwargs):
+                if args[0] == "exec":
+                    return json.dumps({"status": 503, "body": base64.b64encode(b"not ready").decode()}).encode()
+                return self.fake_runtime(args, **kwargs)
+            with patch.object(self.manager, "_run", side_effect=unavailable):
+                state = self.manager.status()
+            self.assertNotEqual(state["state"], "ready")
+            self.assertTrue(state["owned_container"])
+            self.assertIn("Stop", state["message"])
+            self.manager.stop()
+
+    def test_existing_stopped_container_cannot_shortcut_startup_as_ready(self):
+        with patch.object(self.manager, "_run", side_effect=self.fake_runtime):
+            self.manager.setup()
+            self.manager.start()
+            self.running = False
+            with self.assertRaisesRegex(InvalidInput, "Stop"):
+                self.manager.start()
+            self.manager.stop()
+
+    def test_command_errors_identify_the_failed_stage_without_exposing_stderr(self):
+        executable = Path(self.tmp.name) / 'failed-runtime'
+        executable.write_text('#!' + sys.executable + '\nimport sys\nprint("private runtime detail", file=sys.stderr)\nsys.exit(1)\n')
+        executable.chmod(0o700)
+        self.manager.binary = str(executable)
+        for command, stage in [('pull', 'image download'), ('create', 'container creation'), ('cp', 'configuration copy')]:
+            with self.subTest(command=command), self.assertRaises(InvalidInput) as failure:
+                self.manager._run([command])
+            self.assertIn(stage, str(failure.exception))
+            self.assertNotIn('private runtime detail', str(failure.exception))
+
     def test_stopped_docker_fails_before_setup_and_can_retry_without_reopening(self):
         original = {"image_id": self.image_id, "engines": ["bing"]}
         self.manager.state = original.copy()
@@ -243,7 +282,7 @@ class SearchServiceTests(unittest.TestCase):
             def __init__(self, host, port, timeout):
                 calls.append(("connect", host, port, timeout))
             def request(self, method, path, body=None, headers=None):
-                calls.append((method, path))
+                calls.append((method, path, headers))
             def getresponse(self):
                 return Response()
             def close(self):
@@ -252,6 +291,9 @@ class SearchServiceTests(unittest.TestCase):
         with patch("http.client.HTTPConnection", Connection), patch("sys.stdin", io.StringIO('{"method":"POST","path":"/search","body":"q=public"}')), patch("sys.stdout", output):
             exec(HTTP_CLIENT, {})
         self.assertEqual(calls[0][1:3], ("127.0.0.1", 8080))
+        request = next(call for call in calls if call[0] == 'POST')
+        self.assertEqual(request[2]['X-Forwarded-For'], '127.0.0.1')
+        self.assertEqual(request[2]['X-Real-IP'], '127.0.0.1')
         self.assertEqual(json.loads(output.getvalue())["status"], 200)
 
 
