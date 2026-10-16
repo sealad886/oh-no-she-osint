@@ -1,6 +1,7 @@
 """Question, identity and source provenance contracts for schema 3."""
 
 import hashlib
+from contextlib import closing
 from pathlib import Path
 import sqlite3
 import stat
@@ -189,7 +190,7 @@ class QuestionStorageTests(unittest.TestCase):
         backups = list((self.directory / "backups").glob("schema2-*.sqlite3"))
         self.assertEqual(len(backups), 1)
         self.assertEqual(stat.S_IMODE(backups[0].stat().st_mode), 0o600)
-        with sqlite3.connect(backups[0]) as db:
+        with closing(sqlite3.connect(backups[0])) as db:
             self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 2)
             self.assertEqual(before, {table: db.execute("SELECT * FROM " + table + " ORDER BY rowid").fetchall() for table in tables})
         Engine(self.directory)

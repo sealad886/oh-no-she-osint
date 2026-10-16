@@ -1,4 +1,5 @@
 import base64
+from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
@@ -159,11 +160,11 @@ class EngineTests(unittest.TestCase):
             Engine(self.directory)
 
     def test_unknown_schema_is_not_modified(self):
-        with sqlite3.connect(self.engine.path) as db:
+        with closing(sqlite3.connect(self.engine.path)) as db, db:
             db.execute("PRAGMA user_version=999")
         with self.assertRaises(InvalidInput):
             Engine(self.directory)
-        with sqlite3.connect(self.engine.path) as db:
+        with closing(sqlite3.connect(self.engine.path)) as db:
             self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 999)
 
 
