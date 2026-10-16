@@ -54,8 +54,9 @@ logging is introduced. Upstream 403/429/999 blocks are not bypassed.
 - [x] Implement R1/R2 in the canonical recovery flow with behavioral regressions.
 - [x] Implement R3/R4 in SearchService; integrate server cleanup.
 - [x] Implement R5/R6 and R7, update user/operator documentation.
-- [ ] Finish browser qualification; Python/UI/native nginx/Docker checks passed.
-- [ ] Commit coherent slices; complete independent review/fix rounds and merge gates.
+- [x] Finish browser qualification; Python/UI/native nginx/Docker checks passed.
+- [x] Commit coherent slices; complete available independent review/fix rounds.
+- [ ] Verify GitHub identity, configured reviewer/CI and remote merge gates (blocked).
 - [ ] Merge into verified main, verify destination and clean up eligible task refs.
 
 The primary agent owns integration, server/UI/diagnostics and handoff. A bounded
@@ -101,3 +102,46 @@ Qualification: 377 Python tests passed (27.550s), 28 UI tests passed, syntax and
 compilation passed. Real SearXNG via nginx completed a public search and accepted
 Stop in 0.003s, reaching stopped; original synthetic evidence unchanged. Full
 receipts and image identity are in [validation](validation.md).
+
+Browser qualification passed safe diagnostics, actionable Docker-unavailable
+Retry, five-second asynchronous Stop with disabled controls, terminal recovery
+and empty warning/error logs. Owned test fixtures stopped after leaving their
+pages. Read-only fingerprints of the actual cases/evidence/entities/mentions
+match the pre-change snapshot: 3/515/4,678/35,832 records unchanged.
+
+## Review and integration ledger
+
+Local commits:
+
+- `0a20b92 test: close SQLite connections explicitly`
+- `77b5524 fix: recover investigations and own service lifecycles safely`
+
+Configured available source: independent Codex review, separate reviewer context,
+read-only pinned range. Review authority: explicit user invocation of
+iterating-pr-bot-fixes. GitHub integrations cannot be discovered without a remote;
+none is represented as clean, absent or unavailable by inference.
+
+| Round | Source and scope | Request / outcome | Disposition |
+| --- | --- | --- | --- |
+| 1 | Independent Codex; `609d4339be5e19000e4a6d6bb88924dbb0e86748..77b5524e957ecf1e8e64122778e33d4fdb80c041` | Requested after committing the package; reviewer report dated 2026-10-16T19:59:33Z, saved and read back as `osint-reliability-review-round1.md` in the local temporary evidence directory. Complete: no actionable findings. Independently passed 58 focused Python tests (2.801s) and 28 UI tests, unchanged reviewed head and clean working tree. | Explicit clean; retired. No second round required. |
+
+The active review-source set is empty after the clean outcome. Only qualification
+and handoff documentation follows the reviewed implementation commit. The saved
+report distinguishes its focused checks from the primary agent's full-suite,
+native Docker/nginx and browser evidence.
+
+Integration is blocked on GitHub repository identity. The checkout has no remote,
+upstream, PR, main branch or remote merge/check receipts. The user has been asked
+for its URL (or a local-only instruction). Do not invent a remote, create a hosted
+repository, infer configured reviewers, or claim PR/merge completion. Once the
+destination is supplied, inspect its history/default branch and PR template,
+publish only the authorized task branch, attach the PR, discover/request actual
+configured reviewers, satisfy required CI/approval/conflict gates, merge against
+the verified head, and verify main/eligible cleanup. Existing local task history
+must remain reachable.
+
+The observed reliability failures were boundary failures: approval lost between
+two guards, durable failed tasks never reactivated, manager ownership narrower
+than service lifetime, and synchronous cleanup longer than the proxy deadline.
+Regressions now exercise those shared boundaries and distinguish local lifecycle
+success from upstream search availability and factual target coverage.

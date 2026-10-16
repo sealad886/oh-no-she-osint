@@ -33,9 +33,28 @@ unchanged. The official Linux/arm64 image resolved during this run to
 `sha256:3619192d55f19eaec4b01892bdf10f80c67e8592fafd14b26ca504e52229210f`.
 The test-owned nginx/container stopped afterward; Docker remained running.
 
-Visible browser qualification and independent review are pending. Historical
-counts and provider results below describe their dated revisions. Real upstream
-availability and target relevance remain independent of lifecycle/recovery proof.
+Visible qualification in the in-app browser used disposable synthetic workspaces
+and controlled service failures. Local diagnostics showed safe metadata/reference
+IDs without the exception-text canary. A simulated stopped Docker engine produced
+actionable guidance and enabled Retry; a deliberately five-second Stop showed
+`stopping`, disabled both service controls, then restored Start. Browser warning
+and error logs were empty. Leaving the test pages stopped their owned fixtures.
+No model or investigation was launched during this service-control UI check.
+
+Read-only row fingerprints still match the pre-change snapshot for all **3 cases,
+515 evidence records, 4,678 entities and 35,832 mentions** in the existing private
+workspace. Tests used separate temporary workspaces and did not collect a private
+target.
+
+Independent Codex review round 1 completed with **no actionable findings** for
+`609d433..77b5524`. The reviewer independently reran **58 focused Python tests**
+with ResourceWarnings treated as errors, plus all **28 UI tests**. The round
+ledger and integration blocker are in [the plan](reliability-fixes.md).
+Only qualification/handoff documentation changed after that reviewed head.
+GitHub CI, configured reviewers, PR and main-merge checks remain unrun because
+the checkout has no remote or main branch and its destination is unresolved.
+Historical counts/provider results below describe their dated revisions. Real
+upstream availability and target relevance remain independent of these proofs.
 
 ## Native SearXNG gateway and readiness — 2026-10-16
 
