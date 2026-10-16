@@ -1,6 +1,6 @@
 # Source definitions, optional software and attribution
 
-Updated 2026-10-15. The application's own code is covered by the repository
+Updated 2026-10-16. The application's own code is covered by the repository
 [MIT licence](../LICENSE). Public websites, provider APIs, downloaded models,
 optional runtimes and upstream data keep their own terms. This notice does not
 relicense collected evidence or promise permission for every intended use.
@@ -74,6 +74,8 @@ licence grants over returned content:
 | GitHub | [Public user REST API](https://docs.github.com/en/rest/users/users#get-a-user) |
 | GitHub / GitLab public pages | Selected Sherlock-derived URLs, subject to each site's access rules |
 | Internet Archive | [Wayback availability API](https://archive.org/help/wayback_api.php) |
+| Common Crawl | [CDX URL index](https://index.commoncrawl.org/); bounded index catalogue/capture metadata only, no bundled WARC data |
+| Public federated account hosts | [WebFinger RFC 7033](https://www.rfc-editor.org/rfc/rfc7033.html), [ActivityPub](https://www.w3.org/TR/activitypub/); independent adapters, not imported server implementations |
 | GeoNames | [Public place search](https://www.geonames.org/) |
 | DuckDuckGo | [Non-JavaScript public search](https://duckduckgo.com/duckduckgo-help-pages/features/non-javascript) |
 | Bing | [Public search operators](https://support.microsoft.com/en-us/bing/advanced-search-keywords) |
@@ -85,6 +87,24 @@ Response originals retain their source URL, collection time and original-byte ha
 Archiving a response preserves provenance; it does not transfer copyright or
 establish permission to publish it. An archived copy is not independent factual
 corroboration of the same original.
+
+## Optional local document tools
+
+PDF extraction uses an independently installed [Poppler](https://poppler.freedesktop.org/)
+installation (`pdftotext` and `pdftoppm`). Image/scanned-page OCR uses independently
+installed [Tesseract](https://github.com/tesseract-ocr/tesseract) and language data.
+They retain their upstream licences and notices; neither executable, its source,
+nor language data is bundled or relicensed under the application licence.
+Tesseract's upstream [licence](https://github.com/tesseract-ocr/tesseract/blob/main/LICENSE)
+and [command documentation](https://tesseract-ocr.github.io/tessdoc/Command-Line-Usage.html)
+remain the canonical references. Distribution of native tools/language packs would
+need its own licence inventory rather than assuming the adapter's MIT terms apply.
+
+DOCX/ODT extraction uses application code and Python standard-library ZIP/XML
+support. It does not bundle Microsoft Office, LibreOffice, an office renderer or
+third-party Python parser. PDF/office/image originals retain their source rights;
+extracted text and OCR provenance do not grant publication rights or prove that
+recognition is accurate. Retrying extraction does not replace original evidence.
 
 ## Research inspirations and deliberately unbundled projects
 

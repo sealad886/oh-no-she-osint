@@ -52,7 +52,7 @@ class Frontier:
         self.runner = runner
         self.workspace, self.case_id = runner.workspace, runner.case_id
 
-    def guard(self, connector, arguments, explicit=False):
+    def guard(self, connector, arguments, explicit=False, source_id=None):
         """Validate all queued input again immediately before dispatch."""
         from .ai import private_output
         from .connectors import validate_arguments
@@ -85,7 +85,14 @@ class Frontier:
         if connector == 'web_search':
             if set(arguments) not in ({'query'}, {'query', 'provider'}):
                 raise InvalidInput('A search action needs a query and optional provider.')
-            return {**arguments, 'query': self.runner.model_query(arguments['query'])}
+            if self.runner.options.get('automatic') and source_id:
+                from .planner import Controller
+                query = Controller(self.runner).provenance_query(arguments['query'], source_id)
+            else:
+                query = self.runner.model_query(arguments['query'])
+            if 'provider' in arguments and arguments['provider'] not in self.runner.options['providers']:
+                raise InvalidInput('Choose a configured public search provider.')
+            return {**arguments, 'query': query}
         if connector == 'domain_signals':
             from .collector import domain_name, SIGNALS
             if set(arguments) != {'domain', 'signals'} or not isinstance(arguments['signals'], list) or not arguments['signals'] or any(x not in SIGNALS for x in arguments['signals']):
@@ -100,7 +107,13 @@ class Frontier:
                 raise InvalidInput('Choose a public news query.')
             return {'query': self.runner.model_query(arguments['query'])}
         checked = validate_arguments(connector, arguments)
-        if connector != 'email_headers' and connector not in self.runner.options['packs'] and not explicit:
+        automatic_derived = self.runner.options.get('automatic') and source_id and connector in {'webfinger', 'public_actor'}
+        if automatic_derived:
+            evidence = self.runner.engine.evidence(self.case_id, source_id)
+            literal = checked.get('account') or checked.get('url')
+            if evidence['source'].startswith('local-osint:') or not literal or literal not in evidence['text']:
+                raise InvalidInput('Federated account follow-ups require a literal public source reference.')
+        if connector != 'email_headers' and connector not in self.runner.options['packs'] and not explicit and not automatic_derived:
             raise InvalidInput('This source pack is not enabled for this case.')
         if connector in {'crossref', 'searxng'} and not explicit:
             checked['query'] = self.runner.model_query(checked['query'])
@@ -110,7 +123,7 @@ class Frontier:
         return checked
 
     def enqueue(self, connector, arguments, reason, explicit=False, source_id=None, candidate_id=None, priority=0):
-        checked = self.guard(connector, arguments, explicit)
+        checked = self.guard(connector, arguments, explicit, source_id)
         task = self.workspace.enqueue(self.case_id, connector, checked, reason=reason,
             source_id=source_id, candidate_id=candidate_id, priority=priority)
         if explicit:
@@ -142,6 +155,13 @@ class Frontier:
     def record_page(self, page, evidence):
         """Readability is separate from attribution; no observation confirms identity."""
         r = self.runner
+        with r.engine.connection() as db:
+            origin = db.execute('SELECT kind FROM workspace_origins WHERE evidence_id=?', (evidence['id'],)).fetchone()
+            duplicate = db.execute("SELECT id FROM evidence WHERE case_id=? AND sha256=? AND id<>? AND source NOT LIKE 'local-osint:%' ORDER BY collected_at,id LIMIT 1",
+                (self.case_id, evidence['sha256'], evidence['id'])).fetchone()
+        if duplicate and not origin:
+            self.workspace.origin(self.case_id, evidence['id'], 'copy', duplicate['id'],
+                                  'Binary original is identical to an already saved source; it is not independent corroboration.')
         if page.get('url') in r.options['seed_urls'] and page.get('readable') and 'website_sources' in r.options['packs']:
             self.enqueue('website_sources', {'url': evidence['source']},
                 'Discover sources on an explicitly approved starting website, even when its homepage lacks the target name.', source_id=evidence['id'])
@@ -191,7 +211,7 @@ class Frontier:
                 self.enqueue('wayback', {'url': url}, 'Look for an existing public archive after an unsuccessful live-page attempt.', source_id=lead.get('source_id'))
 
     def _choose(self, tasks):
-        if not self.runner.ai or len(tasks) < 2 or self.runner.report.get('action_plan_attempts', 0) >= 4 or self.runner.report.get('action_plan_failures', 0) >= 2:
+        if self.runner.options.get('automatic') or not self.runner.ai or len(tasks) < 2 or self.runner.report.get('action_plan_attempts', 0) >= 4 or self.runner.report.get('action_plan_failures', 0) >= 2:
             return tasks[0]
         # One bounded choice over existing IDs; repeated or invalid model output uses queue order.
         from .ai import choose_action
@@ -209,7 +229,7 @@ class Frontier:
             'reason': 'Local AI did not select fresh permitted work; use the next queued source action.'})
         return tasks[0]
 
-    def run_queue(self, recover=False, task_ids=None):
+    def run_queue(self, recover=False, task_ids=None, max_actions=None):
         r = self.runner
         if recover:
             for task in self.workspace.tasks(self.case_id):
@@ -227,15 +247,18 @@ class Frontier:
             cooling = {item['connector']: item for item in self.workspace.health(self.case_id)
                        if item.get('retry_at') and item['retry_at'] > now()}
             for task in tasks:
-                if task['connector'] in cooling:
-                    health = cooling[task['connector']]
+                health_key = 'web_search:' + task['arguments'].get('provider', r.active_provider) if task['connector'] == 'web_search' else task['connector']
+                if health_key in cooling:
+                    health = cooling[health_key]
                     self.workspace.defer_action(self.case_id, task['id'], health['retry_at'], health.get('error'))
-            tasks = [task for task in tasks if task['connector'] not in cooling]
+            tasks = [task for task in tasks if ('web_search:' + task['arguments'].get('provider', r.active_provider) if task['connector'] == 'web_search' else task['connector']) not in cooling]
             if r.page_count() >= r.options['page_limit']:
                 tasks = [task for task in tasks if task['connector'] != 'collect_page']
             approvals = self.workspace.settings(self.case_id).get('approved_actions', [])
             legacy = {'web_search': 'web_search', 'search_subject': 'wikidata', 'news_search': 'news', 'domain_signals': 'domain'}
             permitted = set(r.options['packs']) | {'collect_page'} | {tool for tool, source in legacy.items() if source in r.options['tools']}
+            if r.options.get('automatic'):
+                permitted.update({'webfinger', 'public_actor'})
             tasks = [x for x in tasks if (x['connector'] in permitted or x['id'] in approvals) and not x['connector'].startswith('historical:')]
             if not tasks:
                 break
@@ -246,7 +269,7 @@ class Frontier:
                 r.engine.evidence(self.case_id, task['source_id'])
                 r.allowed_urls.add(task['arguments']['url'])
             try:
-                args = self.guard(task['connector'], task['arguments'], explicit)
+                args = self.guard(task['connector'], task['arguments'], explicit, task.get('source_id'))
             except InvalidInput as exc:
                 self.workspace.start_action(self.case_id, task['id'], r.report['run_id'])
                 self.workspace.finish_action(self.case_id, task['id'], 'blocked', error=str(exc))
@@ -255,13 +278,21 @@ class Frontier:
             try:
                 if task['connector'] == 'collect_page':
                     r.page(args['url'])
-                elif task['connector'] in legacy:
-                    r.user_tool(task['connector'], args)
+                elif task['connector'] == 'web_search':
+                    r.web_search(args['query'], args.get('provider'))
+                elif task['connector'] == 'search_subject':
+                    r.search_subject(args['query'], args['provider'])
+                elif task['connector'] == 'news_search':
+                    r.news_search(args['query'])
+                elif task['connector'] == 'domain_signals':
+                    r.domain(args['domain'], args['signals'])
                 else:
                     self.execute(task, args)
             finally:
                 r._queue_task = None
             count += 1
+            if max_actions is not None and count >= max_actions:
+                break
         r.report['workspace_counts'] = self.workspace.snapshot(self.case_id)['counts']
         return {'summary': str(count) + ' source actions processed; saved evidence and remaining actions retained.'}
 
@@ -280,7 +311,7 @@ class Frontier:
                     '_outcome': outcome, '_evidence_ids': outcome.get('evidence_ids', []),
                     **({'id': outcome['evidence_ids'][0]} if outcome.get('evidence_ids') else {})}
         result = r.step('Source tool: ' + connector, collect, tool=connector, arguments=arguments,
-                        cost=0 if connector == 'email_headers' else 1)
+                        cost=0 if connector == 'email_headers' else 2 if connector == 'commoncrawl' else 1)
         if outcome and outcome['status'] in {'rate_limited', 'blocked', 'uninterpretable', 'error'}:
             saved = next(x for x in self.workspace.tasks(self.case_id) if x['id'] == task['id'])
             self.workspace.update_health(self.case_id, connector, outcome['status'],
@@ -303,15 +334,17 @@ class Frontier:
             self.workspace.observe(self.case_id, source_id, candidate['id'], quote,
                 predicate=str(observation.get('kind', 'observation'))[:100],
                 value=str(observation.get('value', ''))[:2000])
-        for item in outcome.get('leads', [])[:10]:
+        from .planner import rank_links
+        for item in rank_links(outcome.get('leads', []), r.case, r.options)[:10]:
             url = item.get('url')
-            eligible = (r.relevant(item.get('title', ''), item.get('snippet', '')) or connector in {'website_sources', 'wayback'} or
+            eligible = (r.relevant(item.get('title', ''), item.get('snippet', '')) or connector in {'website_sources', 'wayback', 'commoncrawl', 'webfinger'} or
                         (connector in {'github_public', 'public_profile'} and arguments.get('username') in r.options['public_usernames']))
             if not url or not eligible:
                 continue
             try:
                 r.allowed_urls.add(url)
-                self.enqueue('collect_page', {'url': url}, 'Follow a public lead returned by ' + connector + '.',
+                follow = 'public_actor' if connector == 'webfinger' and item.get('connector') == 'public_actor' else 'collect_page'
+                self.enqueue(follow, {'url': url}, 'Follow a public lead returned by ' + connector + '.',
                     source_id=(outcome.get('evidence_ids') or [None])[0], candidate_id=task.get('candidate_id'), priority=10)
             except InvalidInput:
                 continue

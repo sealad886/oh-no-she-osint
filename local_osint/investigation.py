@@ -31,7 +31,7 @@ MAX_SAFE_INTEGER = 2 ** 53 - 1  # Preserve exact values in the browser's JSON nu
 
 def options_for(case, values=None):
     values = {} if values is None else values
-    if not isinstance(values, dict) or set(values) - {'query', 'context', 'tools', 'max_requests', 'page_limit', 'providers', 'prompts', 'packs', 'public_usernames', 'seed_urls', 'runtime_seconds', 'keep_working'}:
+    if not isinstance(values, dict) or set(values) - {'query', 'context', 'tools', 'max_requests', 'page_limit', 'providers', 'prompts', 'packs', 'public_usernames', 'seed_urls', 'runtime_seconds', 'keep_working', 'automatic', 'question', 'public_country', 'public_language', 'public_organization'}:
         raise InvalidInput('Invalid investigation settings.')
     result = {'query': field(values.get('query', ''), 'Public search query', 200, False) or '"' + case['name'] + '"',
               'context': field(values.get('context', ''), 'Public search context', 200, False),
@@ -41,6 +41,14 @@ def options_for(case, values=None):
               'prompts': validate_prompts(values.get('prompts'))}
     from .frontier import source_settings
     result.update(source_settings(values))
+    result['automatic'] = values.get('automatic', False)
+    if type(result['automatic']) is not bool:
+        raise InvalidInput('Automatic investigation must be true or false.')
+    for key in ['question', 'public_country', 'public_language', 'public_organization']:
+        result[key] = field(values.get(key, ''), key.replace('_', ' '), 1000 if key == 'question' else 200 if key == 'public_organization' else 100, False)
+    if result['automatic']:
+        from .planner import recipe
+        result.update(recipe(case, result))
     if not isinstance(result['providers'], list) or not result['providers'] or any(not isinstance(p, str) or p not in collector.SEARCH_PROVIDERS for p in result['providers']) or len(set(result['providers'])) != len(result['providers']):
         raise InvalidInput('Select supported search providers without duplicates.')
     if not isinstance(result['tools'], list) or (not result['tools'] and not result['packs']) or any(not isinstance(t, str) or t not in SOURCES for t in result['tools']) or len(set(result['tools'])) != len(result['tools']):
@@ -157,7 +165,7 @@ class Investigation:
                 self.allowed_domains.add(self.report['domain_lead']['domain'])
         self.start_step = len(self.report['steps'])
         self.origin = 'engine'
-        if continuing:
+        if continuing or previous and self.options['automatic']:
             if not previous:
                 raise InvalidInput('Run an investigation before continuing it.')
             self.report.pop('ai', None)
@@ -280,6 +288,11 @@ class Investigation:
         from .recovery import SEARCH_WORDS
         allowed.update(SEARCH_WORDS)
         allowed.update('linkedin github contact biography'.split())
+        if self.options.get('automatic'):
+            from .planner import RECIPE_WORDS
+            allowed.update(RECIPE_WORDS | {'filetype', 'pdf'})
+            for key in ['public_country', 'public_language', 'public_organization']:
+                allowed.update(words(self.options.get(key, '')))
         for domain in self.allowed_domains:
             allowed.update(words(domain))
         for url in self.allowed_urls:
@@ -311,6 +324,7 @@ class Investigation:
         result = self.step('Web search (' + collector.SEARCH_PROVIDERS[provider] + '): ' + query, collect,
                            tool='web_search', arguments={'query': query, 'provider': provider})
         if result:
+            self.workspace.update_health(self.case_id, 'web_search:' + provider, 'ready')
             current_results = []
             for item in result['results']:
                 match = self.relevant(item['title'], item['snippet'])
@@ -336,6 +350,10 @@ class Investigation:
             self.publish()
             return {**result, 'results': current_results}
         self.failed_providers.add(provider)
+        from datetime import datetime, timedelta, timezone
+        self.workspace.update_health(self.case_id, 'web_search:' + provider, 'unavailable',
+            retry_at=(datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat(),
+            error='Public search provider unavailable; use another provider while this one cools down.')
         return {'error': 'Web search unavailable. See its tool activity and retry.', 'results': []}
 
     def compare_locally(self):
@@ -412,6 +430,11 @@ class Investigation:
             with self.engine.connection() as db:
                 raw = db.execute('SELECT raw FROM evidence WHERE id=? AND case_id=?', (saved['id'], self.case_id)).fetchone()['raw']
             quality = assess_page(raw, evidence['format'])
+            if evidence['format'] in {'pdf', 'docx', 'odt', 'png', 'jpeg', 'tiff'}:
+                text = evidence['text']
+                position = text.casefold().find(self.case['name'].casefold())
+                window = text[max(0, position - 1200):max(0, position - 1200) + 32000]
+                quality = assess_page(window.encode('utf-8'), 'text')
             match = local_match(self.case, quality['text'], evidence['source'])
             lead = next((x for x in self.report['web_results'] if x['url'] == url), None)
             hint = (lead or {}).get('local_match', {}).get('model_assessment')
@@ -426,8 +449,9 @@ class Investigation:
             if evidence['format'] == 'html' and quality['useful']:
                 parser = PageLinks(evidence['source'])
                 parser.feed(raw.decode('utf-8-sig'))
-                for link in parser.links:
-                    if not self.relevant(link['title']) and not any(w in words(link['title']) for w in ['about', 'profile', 'biography', 'team']):
+                from .planner import rank_links
+                for link in rank_links(parser.links, self.case, self.options):
+                    if not self.options.get('automatic') and not self.relevant(link['title']) and not any(w in words(link['title']) for w in ['about', 'profile', 'biography', 'team']):
                         continue
                     try:
                         collector.public_url(link['url'], allow_query=True)
@@ -467,7 +491,7 @@ class Investigation:
         return self.step(label, reuse, 0, tool, arguments) or result
 
     def page_count(self):
-        return sum(p.get('useful') is True and (self.continuing or p.get('run_id') == self.report['run_id']) for p in self.report['pages'])
+        return sum(p.get('useful') is True and (self.continuing or self.options.get('automatic') or p.get('run_id') == self.report['run_id']) for p in self.report['pages'])
 
     def domain(self, domain, signals=None):
         if not self.enabled:
@@ -991,7 +1015,12 @@ class Investigation:
     def run(self, action=None):
         self.publish(persist=True)
         try:
-            if self.continuing:
+            if self.options['automatic'] and not action:
+                from .planner import Controller
+                self.controller = Controller(self)
+                self.controller.run()
+                return self.report
+            elif self.continuing:
                 self.continue_pipeline()
             elif action:
                 self.user_tool(action['tool'], action['arguments'])
@@ -1021,6 +1050,8 @@ class Investigation:
             self.report['error'] = 'Investigation stopped unexpectedly. Collected evidence is retained.'
             self.report['stop_reason'] = self.report['error']
         finally:
+            if getattr(self, 'controller', None):
+                self.controller.evaluate()
             self.report['finished_at'] = now()
             self.publish('Investigation ' + self.report['status'], persist=True)
         return copy.deepcopy(self.report)
@@ -1071,15 +1102,15 @@ class Jobs:
                 if current['case_id'] == case_id:
                     return copy.deepcopy(current)
                 raise InvalidInput('Another investigation is running. Stop it or wait for completion.')
-            selected_ai = self.ai if use_ai or continuing else None
-            if use_ai and not continuing and (not selected_ai or selected_ai.status()['state'] != 'ready'):
+            selected_ai = self.ai if use_ai or continuing and not (options or {}).get('automatic') else None
+            if use_ai and not continuing and not (options or {}).get('automatic') and (not selected_ai or selected_ai.status()['state'] != 'ready'):
                 raise InvalidInput('Start local AI and wait until ready before selecting AI assistance.')
             self.cancel = threading.Event()
             run_id = uuid.uuid4().hex
             def progress(report):
                 with self.lock:
                     self.states[run_id] = report
-            previous = self.engine.latest_investigation(case_id) if action or continuing else None
+            previous = self.engine.latest_investigation(case_id) if action or continuing or (options or {}).get('automatic') else None
             with self.engine.connection() as db:
                 case = self.engine.require_case(db, case_id)
             from .frontier import SOURCE_KEYS, default_settings

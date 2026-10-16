@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 
-function harness({view = {}} = {}) {
+function harness({view = {}, evidence = {}} = {}) {
   const elements = new Map(), requests = [];
   class Element {
     constructor(tag = 'div') { this.tagName = tag.toUpperCase(); this.children = []; this.listeners = {}; this.dataset = {}; this.value = ''; this.checked = false; this.disabled = false; this.open = false; this._text = ''; }
@@ -16,8 +16,9 @@ function harness({view = {}} = {}) {
     append(...children) { this.children.push(...children); }
     replaceChildren(...children) { this._text = ''; this.children = children; }
     setAttribute(name, value) { this[name] = value; }
+    getAttribute(name) { return this[name] ?? null; }
     addEventListener(type, listener) { (this.listeners[type] ||= []).push(listener); }
-    async fire(type) { for (const listener of this.listeners[type] || []) await listener({preventDefault() {}}); }
+    async fire(type, extra = {}) { for (const listener of this.listeners[type] || []) await listener({preventDefault() {}, ...extra}); }
     querySelector() { return this.children.find(child => ['INPUT', 'SELECT', 'BUTTON'].includes(child.tagName)) || null; }
     showModal() { this.open = true; }
     close() { this.open = false; }
@@ -25,11 +26,16 @@ function harness({view = {}} = {}) {
     reportValidity() { return !this.required || !!this.value; }
   }
   const html = fs.readFileSync(path.join(__dirname, '../local_osint/static/index.html'), 'utf8');
-  for (const match of html.matchAll(/<([a-z]+)[^>]*\bid="([^"]+)"/g)) elements.set(match[2], new Element(match[1]));
+  for (const match of html.matchAll(/<([a-z]+)([^>]*\bid="([^"]+)"[^>]*)>/g)) {
+    const element = new Element(match[1]), attributes = match[2];
+    element.checked = /\bchecked\b/.test(attributes);
+    element.value = attributes.match(/\bvalue="([^"]*)"/)?.[1] || '';
+    elements.set(match[3], element);
+  }
   const walk = element => [element, ...element.children.flatMap(walk)];
   const all = () => [...elements.values()].flatMap(walk);
   const document = {
-    getElementById: id => elements.get(id) || all().find(element => element.id === id), createElement: tag => new Element(tag),
+    getElementById: id => elements.get(id) || all().find(element => element.id === id), createElement: tag => new Element(tag), createElementNS: (_, tag) => new Element(tag),
     createTextNode: text => { const element = new Element('text'); element.textContent = text; return element; },
     addEventListener() {},
     querySelectorAll(selector) {
@@ -50,9 +56,10 @@ function harness({view = {}} = {}) {
     fetch: async (url, options = {}) => {
       requests.push({url, body: options.body ? JSON.parse(options.body) : null});
       const result = url === '/api/connectors' ? {connectors: catalogue, search_service: {state: 'unavailable'}}
-        : url === '/api/status' ? {network: true} : url === '/api/prompts' ? {defaults: {}, providers: []}
+        : url === '/api/status' ? {network: true} : url === '/api/prompts' ? {defaults: {}, providers: [{id:'bing',label:'Bing'},{id:'duckduckgo',label:'DuckDuckGo'}]}
         : url === '/api/ai' ? {state: 'stopped'} : url === '/api/cases' ? []
         : url.startsWith('/api/view?') ? view
+        : url.startsWith('/api/evidence?') ? evidence
         : url.startsWith('/api/workspace?') ? {tasks: [], settings: {}, counts: {}}
         : url.startsWith('/api/investigation?') ? null : {};
       return {ok: true, json: async () => result};
@@ -199,4 +206,165 @@ test('late saved-evidence response cannot alter another source dialog or case', 
   assert.doesNotMatch(ui.elements.get('connector-fields').textContent, /Old case email/);
   const fields = ui.walk(ui.elements.get('connector-fields')).filter(element => element.dataset.connectorField);
   assert.deepEqual(fields.map(field => field.dataset.connectorField), ['username','site']);
+});
+
+test('primary Investigate sends the automatic recipe and public focus without requiring tool choices', async () => {
+  const ui = harness(); await new Promise(resolve => setImmediate(resolve));
+  ui.run(`currentCase='case-a'; currentSubject='Example Person';
+    for (const key of Object.keys(promptLabels)) $('prompt-'+key).value='Use approved sources and retain uncertainty.';
+    $('investigation-query').value='"Example Person"';
+    $('investigation-question').value='Which public sources describe this work?';
+    $('public-country').value='Ireland'; $('public-language').value='English'; $('public-organization').value='Example Foundation';
+    $('identifiers').value='private@example.invalid';`);
+  assert.equal(ui.elements.get('use-ai').checked, true);
+  assert.equal(ui.elements.get('use-ai').disabled, false);
+  await ui.run("startInvestigation('case-a')");
+  const request = ui.requests.find(item => item.url === '/api/investigate');
+  assert.equal(request.body.ai, true);
+  assert.equal(request.body.options.automatic, true);
+  assert.equal(request.body.options.question, 'Which public sources describe this work?');
+  assert.equal(request.body.options.public_country, 'Ireland');
+  assert.equal(request.body.options.public_language, 'English');
+  assert.equal(request.body.options.public_organization, 'Example Foundation');
+  assert.equal(JSON.stringify(request.body).includes('private@example.invalid'), false);
+  assert.ok(request.body.options.tools.includes('web_search'));
+});
+
+test('local AI startup state preserves the analysis preference and explicit opt-out', async () => {
+  const ui = harness(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(ui.elements.get('use-ai').checked, true);
+  await ui.run('refreshAI()');
+  assert.equal(ui.elements.get('use-ai').checked, true);
+  ui.elements.get('use-ai').checked = false;
+  await ui.run('refreshAI()');
+  assert.equal(ui.elements.get('use-ai').checked, false);
+});
+
+test('Continue preserves the automatic public focus and respects an explicit local AI opt-out', async () => {
+  const ui = harness(); await new Promise(resolve => setImmediate(resolve));
+  ui.run(`currentCase='case-a';
+    for (const key of Object.keys(promptLabels)) $('prompt-'+key).value='Use approved sources and retain uncertainty.';
+    setOptions({query:'"Example Person"',question:'Which public sources support this role?',public_country:'Ireland',public_language:'English',public_organization:'Example Foundation'});
+    $('use-ai').checked=false;`);
+  await ui.run("continueInvestigation('case-a')");
+  const request = ui.requests.find(item => item.url === '/api/continue');
+  assert.equal(request.body.options.automatic, true);
+  assert.equal(request.body.options.question, 'Which public sources support this role?');
+  assert.equal(request.body.options.public_country, 'Ireland');
+  assert.equal(request.body.options.public_language, 'English');
+  assert.equal(request.body.options.public_organization, 'Example Foundation');
+  assert.equal(request.body.ai, false);
+});
+
+test('candidate decisions remain explicit and questions show unresolved gaps with source references', async () => {
+  const ui = harness(); await new Promise(resolve => setImmediate(resolve));
+  ui.run(`currentCase='case-a'; renderResearch({tasks:[],claims:[],counts:{},
+    candidates:[{id:'candidate-a',label:'Possible Person',status:'uncertain',source_origin:'https://example.org/team',source_id:'source-a'}],
+    questions:[{id:'question-a',text:'Does this source describe the target?',status:'unresolved',gap:'Affiliation has not been independently corroborated.',evidence_ids:['source-a']}]}, 'case-a')`);
+  const candidates = ui.elements.get('research-candidates');
+  assert.match(candidates.textContent, /https:\/\/example\.org\/team/);
+  const buttons = ui.walk(candidates).filter(element => element.dataset.candidateDecision);
+  assert.equal(buttons.find(button => button.dataset.candidateDecision === 'uncertain')['aria-pressed'], 'true');
+  const questions = ui.elements.get('research-question-list');
+  assert.match(questions.textContent, /Affiliation has not been independently corroborated/);
+  assert.equal(ui.walk(questions).filter(element => element.tagName === 'BUTTON').length, 1);
+  await buttons.find(button => button.dataset.candidateDecision === 'different').fire('click');
+  assert.deepEqual(ui.requests.find(item => item.url === '/api/candidate/decision').body, {case:'case-a',candidate:'candidate-a',status:'different'});
+});
+
+test('choosing a PDF, office document or image automatically selects its import format', async () => {
+  const ui = harness(); await new Promise(resolve => setImmediate(resolve));
+  for (const [name, mime, format] of [
+    ['scan.PDF','application/pdf','pdf'], ['report.docx','','docx'], ['notes.odt','','odt'],
+    ['page.png','image/png','png'], ['photo.JPG','image/jpeg','jpeg'], ['scan.tif','image/tiff','tiff'],
+    ['scan.tiff','','tiff'], ['download','application/pdf','pdf'], ['message.eml','','text']
+  ]) {
+    ui.elements.get('file').files = [{name,type:mime}];
+    await ui.elements.get('file').fire('change');
+    assert.equal(ui.elements.get('format').value, format);
+    assert.equal(ui.elements.get('title').value, name);
+  }
+});
+
+test('document evidence exposes extraction status and pages and retries only local extraction', async () => {
+  const ui = harness({evidence:{id:'document-a',title:'Scan.pdf',source:'Scan.pdf',format:'pdf',collected_at:'2026-10-16T12:00:00Z',sha256:'original-hash',text:'Original extraction',mentions:[],document:{status:'partial',text:'Latest local extraction',pages:[{page:1,start:0,end:23}],warnings:['One page needs local OCR language data.']}}});
+  await new Promise(resolve => setImmediate(resolve));
+  await ui.run("currentCase='case-a'; showEvidence('case-a','document-a')");
+  const details = ui.elements.get('detail-content');
+  assert.match(details.textContent, /partial/);
+  assert.match(details.textContent, /Page 1/);
+  assert.match(details.textContent, /One page needs local OCR language data/);
+  assert.match(details.textContent, /Latest local extraction/);
+  assert.match(details.textContent, /original-hash/);
+  const retry = ui.walk(details).find(element => element.dataset.documentReextract === 'document-a');
+  await retry.fire('click');
+  assert.deepEqual(ui.requests.find(item => item.url === '/api/document/reextract').body, {case:'case-a',id:'document-a',document_options:{ocr:true}});
+  assert.equal(ui.requests.some(item => item.url === '/api/action' || item.url === '/api/investigate'), false);
+});
+
+test('document claims expose cited page numbers with the exact original evidence reference', async () => {
+  const ui = harness(); await new Promise(resolve => setImmediate(resolve));
+  ui.run(`currentCase='case-a'; renderResearch({tasks:[],candidates:[],claims:[{id:'claim-a',predicate:'public statement',value:'A quoted observation',status:'unconfirmed',references:[{evidence_id:'document-a',quote:'Exact text',extractor_version:'documents-v1',start:10,end:20,pages:[{page:2,start:0,end:200},{page:3,start:200,end:400}],relation:'support'}]}],counts:{}},'case-a')`);
+  assert.match(ui.elements.get('research-claims').textContent, /Pages 2, 3/);
+  assert.match(ui.elements.get('evidence-relationships').textContent, /Pages 2, 3/);
+  assert.equal(ui.walk(ui.elements.get('research-claims')).filter(element => element.tagName === 'BUTTON').length, 1);
+});
+
+test('evidence atlas draws only recorded provenance and question citations, never inferred target or namesake edges', async () => {
+  const ui = harness(); await new Promise(resolve => setImmediate(resolve));
+  const graph = JSON.parse(ui.run(`JSON.stringify(atlasGraph({candidates:[{id:'candidate-a',label:'Namesake A',status:'uncertain',source_id:'source-a'},{id:'candidate-b',label:'Namesake B',status:'different'}],claims:[{candidate_id:'candidate-a',references:[{evidence_id:'source-a',relation:'support',quote:'Literal text'}]}],questions:[{id:'question-a',text:'Which role is supported?',status:'unresolved',evidence_ids:['source-b']}],origins:[{evidence_id:'source-a',kind:'unknown',established:false}]},'Research target'))`));
+  assert.ok(graph.edges.some(edge => edge.from === 'candidate:candidate-a' && edge.to === 'source:source-a'));
+  assert.ok(graph.edges.some(edge => edge.from === 'question:question-a' && edge.to === 'source:source-b'));
+  assert.equal(graph.edges.some(edge => edge.from === 'focus' || edge.to === 'focus'), false);
+  assert.equal(graph.edges.some(edge => edge.from === 'candidate:candidate-b'), false);
+  assert.equal(graph.nodes.find(point => point.id === 'source:source-a').status, 'unknown');
+});
+
+test('partial-result atlas supports keyboard source activation and keeps unknown origin explicit', async () => {
+  const ui = harness({evidence:{id:'source-a',title:'Saved public source',source:'https://example.org/team',format:'text',text:'Literal source passage',mentions:[]}});
+  await new Promise(resolve => setImmediate(resolve));
+  ui.run(`currentCase='case-a'; currentSubject='Research target'; displayedRun={case_id:'case-a',status:'partial'};
+    renderEvidenceAtlas({candidates:[{id:'candidate-a',label:'Possible person',status:'uncertain',source_id:'source-a'}],claims:[],questions:[{id:'question-a',text:'Which role?',status:'unresolved',gap:'No independent corroboration',evidence_ids:['source-a']}],origins:[]},'case-a')`);
+  assert.equal(ui.elements.get('evidence-atlas').hidden, false);
+  const points = ui.walk(ui.elements.get('atlas-canvas')).filter(element => element.dataset.atlasNode);
+  const source = points.find(element => element.dataset.atlasNode === 'source:source-a');
+  assert.equal(source.getAttribute('tabindex'), '0');
+  await source.fire('keydown', {key:'Enter'});
+  assert.match(ui.elements.get('atlas-detail').textContent, /Origin is not established/);
+  // A stable background poll must not discard the selected graph or inspector.
+  ui.run('renderEvidenceAtlas(atlasState.workspace,currentCase)');
+  assert.equal(ui.elements.get('atlas-node-picker').value, 'source:source-a');
+  const open = ui.walk(ui.elements.get('atlas-detail')).find(element => element.tagName === 'BUTTON');
+  await open.fire('click');
+  assert.ok(ui.requests.some(item => item.url === '/api/evidence?case=case-a&id=source-a'));
+});
+
+test('atlas question selection exposes gaps and cannot read an old case after switching', async () => {
+  const ui = harness(); await new Promise(resolve => setImmediate(resolve));
+  ui.run(`currentCase='case-a'; displayedRun={case_id:'case-a',status:'partial'};
+    renderEvidenceAtlas({candidates:[],claims:[],origins:[],questions:[{id:'q',text:'Which affiliation?',status:'unresolved',gap:'Affiliation remains uncorroborated',evidence_ids:['source-a']}]},'case-a');
+    inspectAtlasPoint('question:q')`);
+  assert.match(ui.elements.get('atlas-detail').textContent, /Affiliation remains uncorroborated/);
+  const read = ui.walk(ui.elements.get('atlas-detail')).find(element => element.tagName === 'BUTTON');
+  const before = ui.requests.length; ui.run("currentCase='case-b'");
+  await read.fire('click');
+  assert.equal(ui.requests.length, before);
+});
+
+test('atlas remains hidden during collection and for empty results', async () => {
+  const ui = harness(); await new Promise(resolve => setImmediate(resolve));
+  ui.run("currentCase='case-a'; displayedRun={case_id:'case-a',status:'running'}; renderEvidenceAtlas({questions:[{id:'q',text:'Question'}]},'case-a')");
+  assert.equal(ui.elements.get('evidence-atlas').hidden, true);
+  ui.run("displayedRun={case_id:'case-a',status:'complete'}; renderEvidenceAtlas({candidates:[],claims:[],questions:[],origins:[]},'case-a')");
+  assert.equal(ui.elements.get('evidence-atlas').hidden, true);
+});
+
+test('atlas preserves saved evidence titles when report page records omit their title', async () => {
+  const ui = harness(); await new Promise(resolve => setImmediate(resolve));
+  ui.run(`currentCase='case-a'; displayedRun={case_id:'case-a',status:'partial',pages:[{source_id:'source-a',url:'https://example.org/team'}]};
+    atlasEvidence={caseId:'case-a',items:[{id:'source-a',title:'Named public team source',source:'https://example.org/team'}]};
+    renderEvidenceAtlas({candidates:[{id:'candidate-a',label:'Possible match',source_id:'source-a'}],claims:[],questions:[],origins:[]},'case-a');
+    inspectAtlasPoint('source:source-a')`);
+  assert.match(ui.elements.get('atlas-detail').textContent, /Named public team source/);
+  assert.match(ui.elements.get('atlas-node-picker').textContent, /Named public team source/);
 });

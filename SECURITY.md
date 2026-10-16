@@ -31,10 +31,11 @@ identity-verification system. Access to a source does not establish its truth.
   caps mentions per item. Searchable UI lists are bounded; exports retain originals.
   These are per-item/request bounds, not a total workspace disk quota.
 
-Schema-1 upgrades first create a consistent, integrity-checked private database
-backup, then add schema-2 tables transactionally. Historical reports stay intact;
+Schema-1/2 upgrades first create a consistent, integrity-checked private database
+backup, then add schema-3 tables/columns transactionally and offline. Historical reports stay intact;
 imported old tasks are marked historical and cannot silently resume. New data
-includes task/attempt history, source health, candidates, versioned extractions and
+includes task/attempt history, source health, candidates, questions, reversible
+identity decisions, source-origin lineage, versioned document text/page spans and
 claim references. Rollback requires stopping writers and restoring a retained
 backup into a separate private directory; see [README](README.md#storage-upgrades-and-recovery).
 Migration is not consent to perform collection.
@@ -61,7 +62,8 @@ resolver behavior and timeout policy.
 
 Public collection requires process-level network permission and user-directed
 work. Offline mode rejects provider/page/domain/connector operations before DNS.
-Local email analysis, SQLite retrieval and cached-model processing remain local.
+Local email/document/OCR analysis, SQLite retrieval and cached-model processing
+remain local.
 The optional search-service setup action is separately explicit; it is not part
 of an ordinary offline or missing-service investigation.
 
@@ -72,7 +74,10 @@ plugins or model-generated commands. Password-reset enumeration, login-required
 scraping, CAPTCHA bypass, brokers and breach aggregation are absent.
 
 Automatic public-profile checks require usernames approved in case settings.
-Newly discovered handles never expand that permission. An explicit source action
+Newly discovered handles never authorize guessed checks on other sites. A separate
+WebFinger path can resolve an exact account literally present in a cited public
+source, after source/private-clue validation; it never guesses accounts across
+instances. An explicit source action
 approves only its exact inputs; this permission is persisted for resumption.
 Private identifiers remain comparison clues, not automatically generated search
 terms. The dispatcher revalidates private-clue rejection, connector permission,
@@ -84,6 +89,39 @@ rate limits, uninterpretable responses and errors. Response originals are retain
 where available. Login walls, shells and unrelated pages do not fill useful goals.
 A challenge or failed parser is not represented as evidence of absence.
 
+Common Crawl performs a bounded catalogue/index lookup for an approved public URL
+prefix. It reads capture/URL metadata, not WARC bodies or an unlimited corpus.
+Index captures are leads, never substantive page evidence. WebFinger requires an
+exact public account and checks the returned subject. Public ActivityPub documents
+must identify a plausible actor on the expected origin; contexts, inbox/outbox and
+follower links stay inert. No posting, account login or cross-instance enumeration
+is performed.
+
+## Local document processing
+
+PDF, DOCX, ODT, PNG, JPEG and TIFF originals stay local. Office text uses bounded
+in-memory ZIP/XML parsing; archive traversal, symlinks, encrypted members, duplicate
+members and XML entity/DOCTYPE declarations are refused. No office application or
+macro runs. Optional installed Poppler/Tesseract tools process PDF text and scans
+through fixed argument lists, not document-supplied commands. The app never uploads
+a document or installs tools/language data automatically.
+
+Inputs and extracted text are bounded to 2 MiB; office expansion to 8 MiB/300
+members; PDF processing to 100 pages. Images are limited to 16 megapixels and
+10,000 pixels per dimension, and multi-page TIFF is refused. Native calls use
+private temporary files, parent-bound supervision, output limits, per-call time
+bounds and a total extraction deadline; POSIX CPU/file-size limits also apply.
+This is not a full native-parser sandbox. The installed binaries and their image/
+document decoders are additional local trust boundaries running as the OS user.
+
+Supported originals can remain available with unavailable/needs-OCR/limited
+status when extraction cannot complete. Malformed/unsafe inputs may be rejected.
+Retry extraction creates or reuses a versioned artifact without overwriting raw
+bytes or previous cited spans. Page metadata includes extraction version and exact
+text ranges; OCR can be wrong, and office page breaks need not match rendered
+pagination. Matching a passage proves extracted-text correspondence, not visual
+truth. Default OCR language is English and is separate from public search language.
+
 ## Persistent actions, retries and attribution
 
 Actions persist their arguments, reason, candidate/source scope, priority and
@@ -94,12 +132,24 @@ local process died. Resume can repeat supported read-only actions. Exactly-once
 external execution is not claimed. Existing evidence and prior attempts remain.
 
 Rate-limit cooldowns/health survive restart. Retry cannot bypass an active cooldown.
-In-flight work can complete before Stop takes effect. Request ceiling, page goal,
-per-request bounds and cancellation remain effective when the user removes the
-soft elapsed-time deadline with page-scoped keep-working mode.
+In-flight work can complete before Stop takes effect. Request ceiling, page
+collection goal, per-request bounds and cancellation remain effective when the
+user removes the soft elapsed-time deadline with page-scoped keep-working mode.
+
+The single Investigate action selects a bounded source recipe and starts the
+available cached model, with deterministic fallback if unavailable. Public objective,
+country/language/organization/context are explicitly outbound-capable inputs;
+private comparison clues remain local. Reaching a useful-page goal or obtaining
+HTTP 200 cannot mark all investigation questions answered.
 
 Candidates are source-backed, unconfirmed hypotheses; matching names do not merge
-them. Observations cite exact start/end spans in immutable versioned text copies,
+them. Reversible same/different/uncertain identity decisions are recorded separately
+from claim and question status. Marking a candidate same does not verify every
+claim. Unknown source origin is not independent support; original/copy/syndicated/
+archive lineage must be established before independence is counted. Identical or
+linked copies do not gain independent support merely by appearing at more URLs.
+
+Observations cite exact start/end spans in immutable versioned text copies,
 with text and original-evidence hashes. Invalid spans and cross-case references
 are rejected. Supporting/contradicting references are separate; contradictory
 references can mark a claim disputed. Generated local reports cannot support
@@ -108,7 +158,11 @@ as independent corroboration merely because they appear multiple times.
 
 A valid span proves the quote matches the saved text; it does not prove the
 predicate, source truth, attribution or semantic entailment of a model's prose.
-Automatic model observations remain unconfirmed. Review the source and its context.
+Automatic observations remain unconfirmed. Custom questions can receive local AI
+interpretation with literal offered-source quotes; disputed answers require
+supporting and opposing references. These checks validate citations, not arbitrary
+semantic entailment. Question support stays separate from unresolved identity and
+corroboration. Review the original source and its context.
 
 ## Local model boundary
 
@@ -121,8 +175,12 @@ use depends on the chosen model and is not isolated from other local application
 
 Eight bounded prompts guide planning, recovery, action ranking, extraction and
 drafting. Prompt text and public source material cannot expand dispatcher scope.
-Action planning chooses offered existing IDs. Invalid or repeated choices fall
-back to deterministic queue order. Extraction requires exact source passages;
+The bounded action chooser selects offered IDs. Automatic planning can also
+propose typed queries, literal source URLs or exact public federated accounts,
+each tied to an offered saved source and verified quote. It cannot invent private
+inputs, claim a synthetic report as authority or guess a cross-site handle.
+Invalid, repeated or ungrounded proposals fall back to deterministic recipes,
+provider changes and queue order. Extraction requires exact source passages;
 case-scoped SQLite retrieval supplies relevant local evidence for drafting.
 Assistant calls remain bounded; model output may be truncated or incomplete.
 

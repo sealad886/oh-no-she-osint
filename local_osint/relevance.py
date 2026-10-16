@@ -9,7 +9,8 @@ def words(text):
 
 def outbound_private_clues(case, options):
     """Clues deliberately entered in public settings are already authorized."""
-    public = ' '.join([case['name'], *case.get('aliases', []), options.get('query', ''), options.get('context', '')]).casefold()
+    public = ' '.join([case['name'], *case.get('aliases', []), options.get('query', ''), options.get('context', ''),
+                       options.get('public_country', ''), options.get('public_language', ''), options.get('public_organization', '')]).casefold()
     return [clue for clue in case.get('identifiers', []) if clue.casefold() not in public]
 
 

@@ -10,15 +10,19 @@ import os
 import re
 import sqlite3
 import uuid
+import unicodedata
 from datetime import datetime, timezone
 
 from .engine import Engine, InvalidInput, field, now, private_directory
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 EXTRACTOR_VERSION = "plain-v1"
 TASK_STATES = frozenset({"pending", "running", "cooldown", "blocked", "complete", "failed", "skipped", "interrupted_after_dispatch"})
 FINISH_STATES = TASK_STATES - {"pending", "running"}
 CLAIM_STATES = frozenset({"unconfirmed", "supported", "disputed", "rejected"})
+QUESTION_STATES = frozenset({"supported", "disputed", "unresolved", "unavailable"})
+IDENTITY_STATES = frozenset({"same", "different", "uncertain"})
+ORIGIN_KINDS = frozenset({"unknown", "original", "copy", "syndicated", "archive"})
 
 TABLES = [
     """CREATE TABLE workspace_settings (case_id TEXT PRIMARY KEY REFERENCES cases(id),
@@ -57,6 +61,28 @@ TABLES = [
 ]
 
 
+QUESTION_TABLES = [
+    """CREATE TABLE IF NOT EXISTS workspace_questions (id TEXT PRIMARY KEY, case_id TEXT NOT NULL REFERENCES cases(id),
+        question_key TEXT NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL, candidate_id TEXT REFERENCES workspace_candidates(id),
+        refs TEXT NOT NULL, gaps TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        UNIQUE(case_id,question_key))""",
+    """CREATE TABLE IF NOT EXISTS workspace_identity_decisions (id TEXT PRIMARY KEY, case_id TEXT NOT NULL REFERENCES cases(id),
+        candidate_id TEXT NOT NULL REFERENCES workspace_candidates(id), status TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL)""",
+    """CREATE TABLE IF NOT EXISTS workspace_origins (evidence_id TEXT PRIMARY KEY REFERENCES evidence(id),
+        case_id TEXT NOT NULL REFERENCES cases(id), kind TEXT NOT NULL, source_id TEXT REFERENCES evidence(id),
+        reason TEXT NOT NULL, updated_at TEXT NOT NULL)""",
+    """CREATE TABLE IF NOT EXISTS workspace_document_pages (extraction_id TEXT PRIMARY KEY REFERENCES workspace_extractions(id),
+        pages TEXT NOT NULL, status TEXT NOT NULL, warnings TEXT NOT NULL)""",
+    "CREATE INDEX IF NOT EXISTS workspace_questions_case ON workspace_questions(case_id,status)",
+    "CREATE INDEX IF NOT EXISTS workspace_decisions_candidate ON workspace_identity_decisions(case_id,candidate_id,created_at)",
+]
+
+
+def normalized(value):
+    """Normalize proposition text without erasing punctuation, negation or dates."""
+    return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
+
+
 def canonical(value):
     try:
         result = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
@@ -80,9 +106,9 @@ def task_key(connector, arguments, candidate_id=None, source_id=None):
     return hashlib.sha256(canonical([connector, arguments, candidate_id, source_id]).encode()).hexdigest()
 
 
-def migration_backup(engine):
+def migration_backup(engine, version=1):
     directory = private_directory(engine.directory / "backups")
-    destination = directory / ("schema1-" + uuid.uuid4().hex + ".sqlite3")
+    destination = directory / ("schema" + str(version) + "-" + uuid.uuid4().hex + ".sqlite3")
     fd = os.open(destination, os.O_CREAT | os.O_EXCL | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
     os.close(fd)
     backup = sqlite3.connect(destination)
@@ -99,36 +125,45 @@ def migration_backup(engine):
 
 
 def initialize_storage(engine, version):
-    """Upgrade v1 once, preserving a consistent owner-only pre-migration backup."""
+    """Upgrade offline once, preserving a consistent owner-only pre-migration backup."""
     if version == SCHEMA_VERSION:
         return
-    if version not in {0, 1}:
+    if version not in {0, 1, 2}:
         raise InvalidInput("Unsupported database version. Restore a compatible backup.")
-    if version == 1:
-        migration_backup(engine)
+    if version in {1, 2}:
+        migration_backup(engine, version)
     with engine.connection() as db:
         db.execute("BEGIN IMMEDIATE")
-        # Another local startup may have completed the migration while backing up.
         current = db.execute("PRAGMA user_version").fetchone()[0]
         if current == SCHEMA_VERSION:
             return
-        if current not in {0, 1}:
+        if current not in {0, 1, 2}:
             raise InvalidInput("Database version changed; reopen a compatible database.")
-        for statement in TABLES:
+        if current in {0, 1}:
+            for statement in TABLES:
+                db.execute(statement)
+            try:
+                db.execute("CREATE VIRTUAL TABLE workspace_search USING fts5(evidence_id UNINDEXED, case_id UNINDEXED, title, text)")
+                db.execute("""INSERT INTO workspace_search(evidence_id,case_id,title,text)
+                    SELECT id,case_id,title,text FROM evidence WHERE source NOT LIKE 'local-osint:%'""")
+                db.execute("""CREATE TRIGGER workspace_search_insert AFTER INSERT ON evidence
+                    WHEN new.source NOT LIKE 'local-osint:%' BEGIN
+                    INSERT INTO workspace_search(evidence_id,case_id,title,text) VALUES(new.id,new.case_id,new.title,new.text); END""")
+            except sqlite3.OperationalError as exc:
+                if "no such module" not in str(exc).lower():
+                    raise
+            if current == 1:
+                _import_reports(db)
+        for statement in QUESTION_TABLES:
             db.execute(statement)
-        try:
-            db.execute("CREATE VIRTUAL TABLE workspace_search USING fts5(evidence_id UNINDEXED, case_id UNINDEXED, title, text)")
-            db.execute("""INSERT INTO workspace_search(evidence_id,case_id,title,text)
-                SELECT id,case_id,title,text FROM evidence WHERE source NOT LIKE 'local-osint:%'""")
-            db.execute("""CREATE TRIGGER workspace_search_insert AFTER INSERT ON evidence
-                WHEN new.source NOT LIKE 'local-osint:%' BEGIN
-                INSERT INTO workspace_search(evidence_id,case_id,title,text) VALUES(new.id,new.case_id,new.title,new.text); END""")
-        except sqlite3.OperationalError as exc:
-            if "no such module" not in str(exc).lower():
-                raise
-        if version == 1:
-            _import_reports(db)
-        db.execute("PRAGMA user_version=2")
+        columns = {row[1] for row in db.execute("PRAGMA table_info(workspace_claims)")}
+        if "normalized_key" not in columns:
+            db.execute("ALTER TABLE workspace_claims ADD COLUMN normalized_key TEXT")
+        if "observed_at" not in columns:
+            db.execute("ALTER TABLE workspace_claims ADD COLUMN observed_at TEXT NOT NULL DEFAULT ''")
+        # Existing claims remain separate: historical observations never establish
+        # identity or independence merely because their wording happens to match.
+        db.execute("PRAGMA user_version=3")
 
 
 def _event(db, case_id, task_id, event, detail=None):
@@ -387,6 +422,161 @@ class Workspace:
             self._require(db, "workspace_tasks", case_id, task_id, "Action")
             return [{**dict(row), "result": json.loads(row["result"]) if row["result"] is not None else None} for row in db.execute("SELECT * FROM workspace_attempts WHERE task_id=? AND case_id=? ORDER BY started_at,id", (task_id, case_id))]
 
+    @staticmethod
+    def _question(row):
+        result = dict(row)
+        result["key"] = result["question_key"]
+        result["refs"] = json.loads(result["refs"])
+        result["gaps"] = json.loads(result["gaps"])
+        result["evidence_ids"] = [ref if isinstance(ref, str) else ref["evidence_id"] for ref in result["refs"]]
+        result["gap"] = " ".join(item for item in result["gaps"] if isinstance(item, str))
+        return result
+
+    def questions(self, case_id):
+        with self.engine.connection() as db:
+            self.engine.require_case(db, case_id)
+            return [self._question(row) for row in db.execute("SELECT * FROM workspace_questions WHERE case_id=? ORDER BY created_at,id", (case_id,))]
+
+    def _question_values(self, db, case_id, status, candidate_id, refs, gaps):
+        if status not in QUESTION_STATES:
+            raise InvalidInput("Choose supported, disputed, unresolved or unavailable question status.")
+        if candidate_id:
+            self._require(db, "workspace_candidates", case_id, candidate_id, "Candidate")
+        if not isinstance(refs, list) or len(refs) > 200 or not isinstance(gaps, list) or len(gaps) > 100:
+            raise InvalidInput("Question references and gaps must be bounded lists.")
+        for ref in refs:
+            identifier = ref if isinstance(ref, str) else ref.get("evidence_id") if isinstance(ref, dict) else None
+            if not isinstance(identifier, str):
+                raise InvalidInput("Question references must identify evidence in this case.")
+            self._require(db, "evidence", case_id, identifier, "Evidence")
+        canonical(refs)
+        canonical(gaps)
+
+    def question(self, case_id, text, status="unresolved", candidate_id=None, refs=None, gaps=None, *, key=None, evidence_ids=None, gap=None):
+        text = field(text, "Investigation question", 2000)
+        refs = evidence_ids if evidence_ids is not None else refs or []
+        gaps = [gap] if gap is not None else gaps or []
+        key = field(key, "Question key", 500) if key is not None else hashlib.sha256(canonical([normalized(text), candidate_id]).encode()).hexdigest()
+        with self.engine.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self.engine.require_case(db, case_id)
+            self._question_values(db, case_id, status, candidate_id, refs, gaps)
+            existing = db.execute("SELECT * FROM workspace_questions WHERE case_id=? AND question_key=?", (case_id, key)).fetchone()
+            if existing:
+                return self._question(existing)
+            identifier, stamp = uuid.uuid4().hex, now()
+            db.execute("INSERT INTO workspace_questions VALUES(?,?,?,?,?,?,?,?,?,?)", (identifier, case_id, key, text, status, candidate_id, canonical(refs), canonical(gaps), stamp, stamp))
+            _event(db, case_id, None, "question_created", {"question_id": identifier})
+            return self._question(db.execute("SELECT * FROM workspace_questions WHERE id=?", (identifier,)).fetchone())
+
+    def update_question(self, case_id, question_id, *, text=None, status=None, candidate_id=None, refs=None, gaps=None, evidence_ids=None, gap=None):
+        with self.engine.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = self._question(self._require(db, "workspace_questions", case_id, question_id, "Question"))
+            text = row["text"] if text is None else field(text, "Investigation question", 2000)
+            status = row["status"] if status is None else status
+            candidate_id = row["candidate_id"] if candidate_id is None else candidate_id
+            refs = evidence_ids if evidence_ids is not None else row["refs"] if refs is None else refs
+            gaps = [gap] if gap is not None else row["gaps"] if gaps is None else gaps
+            self._question_values(db, case_id, status, candidate_id, refs, gaps)
+            db.execute("UPDATE workspace_questions SET text=?,status=?,candidate_id=?,refs=?,gaps=?,updated_at=? WHERE id=?", (text, status, candidate_id, canonical(refs), canonical(gaps), now(), question_id))
+            _event(db, case_id, None, "question_updated", {"question_id": question_id, "status": status})
+            return self._question(db.execute("SELECT * FROM workspace_questions WHERE id=?", (question_id,)).fetchone())
+
+    def decide_candidate(self, case_id, candidate_id, status, reason=""):
+        if status not in IDENTITY_STATES:
+            raise InvalidInput("Choose same, different or uncertain identity.")
+        reason = field(reason, "Identity decision reason", 2000, required=False)
+        with self.engine.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._require(db, "workspace_candidates", case_id, candidate_id, "Candidate")
+            identifier = uuid.uuid4().hex
+            db.execute("INSERT INTO workspace_identity_decisions VALUES(?,?,?,?,?,?)", (identifier, case_id, candidate_id, status, reason, now()))
+            # This classification changes no original, candidate ID or claim link.
+            db.execute("UPDATE workspace_candidates SET status=? WHERE id=?", (status, candidate_id))
+            _event(db, case_id, None, "identity_decided", {"candidate_id": candidate_id, "status": status, "decision_id": identifier})
+            return dict(db.execute("SELECT * FROM workspace_candidates WHERE id=?", (candidate_id,)).fetchone())
+
+    def origin(self, case_id, evidence_id, kind="unknown", source_id=None, reason=""):
+        if not isinstance(kind, str) or kind not in ORIGIN_KINDS:
+            raise InvalidInput("Choose a known evidence origin relationship.")
+        if (kind in {"copy", "syndicated", "archive"}) != bool(source_id):
+            raise InvalidInput("Only copies, syndication and archives identify source evidence.")
+        if source_id == evidence_id:
+            raise InvalidInput("An evidence original cannot derive from itself.")
+        reason = field(reason, "Origin reason", 2000, required=False)
+        with self.engine.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._require(db, "evidence", case_id, evidence_id, "Evidence")
+            if source_id:
+                self._require(db, "evidence", case_id, source_id, "Source evidence")
+                seen = {evidence_id}
+                cursor = source_id
+                while cursor:
+                    if cursor in seen:
+                        raise InvalidInput("Evidence origin relationships cannot form a cycle.")
+                    seen.add(cursor)
+                    row = db.execute("SELECT source_id FROM workspace_origins WHERE evidence_id=?", (cursor,)).fetchone()
+                    cursor = row[0] if row else None
+            db.execute("INSERT OR REPLACE INTO workspace_origins VALUES(?,?,?,?,?,?)", (evidence_id, case_id, kind, source_id, reason, now()))
+            _event(db, case_id, None, "origin_recorded", {"evidence_id": evidence_id, "kind": kind, "source_id": source_id})
+            return self._origin(db, evidence_id)
+
+    @staticmethod
+    def _origin(db, evidence_id):
+        initial = db.execute("SELECT * FROM workspace_origins WHERE evidence_id=?", (evidence_id,)).fetchone()
+        result = dict(initial) if initial else {"evidence_id": evidence_id, "kind": "unknown", "source_id": None, "reason": "Origin not established."}
+        cursor, seen, established = evidence_id, set(), False
+        while cursor and cursor not in seen:
+            seen.add(cursor)
+            row = db.execute("SELECT kind,source_id FROM workspace_origins WHERE evidence_id=?", (cursor,)).fetchone()
+            if not row:
+                break
+            if row["kind"] == "original" and not row["source_id"]:
+                established = True
+                break
+            if not row["source_id"]:
+                break
+            cursor = row["source_id"]
+        result["origin_id"] = cursor
+        result["established"] = established
+        # Equal binary originals are always one origin, including mislabeled copies.
+        digest = db.execute("SELECT sha256 FROM evidence WHERE id=?", (cursor,)).fetchone()
+        result["independence_key"] = digest[0] if digest and established else None
+        return result
+
+    def record_extraction(self, case_id, evidence_id, text, extractor_version, pages=None, status="ready", warnings=None):
+        extractor_version = field(extractor_version, "Extractor version", 100)
+        if not isinstance(text, str) or "\x00" in text or len(text) > 8 * 1024 * 1024:
+            raise InvalidInput("Extracted text must be bounded text.")
+        if status not in {"ready", "needs_ocr", "unavailable", "limited"}:
+            raise InvalidInput("Unknown document extraction status.")
+        pages = [] if pages is None else pages
+        warnings = [] if warnings is None else warnings
+        if not isinstance(pages, list) or not isinstance(warnings, list):
+            raise InvalidInput("Document pages and warnings must be lists.")
+        previous_end = 0
+        for page in pages:
+            if not isinstance(page, dict) or any(isinstance(page.get(name), bool) or not isinstance(page.get(name), int) for name in ("page", "start", "end")):
+                raise InvalidInput("Document pages must have exact numbered text spans.")
+            if page["page"] < 1 or page["start"] < previous_end or page["end"] < page["start"] or page["end"] > len(text):
+                raise InvalidInput("Document page span is outside the extraction.")
+            previous_end = page["end"]
+        with self.engine.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            evidence = self._require(db, "evidence", case_id, evidence_id, "Evidence")
+            digest = hashlib.sha256(text.encode()).hexdigest()
+            existing = db.execute("SELECT id FROM workspace_extractions WHERE evidence_id=? AND extractor_version=? AND text_sha256=?", (evidence_id, extractor_version, digest)).fetchone()
+            identifier = existing[0] if existing else uuid.uuid4().hex
+            if not existing:
+                db.execute("INSERT INTO workspace_extractions VALUES(?,?,?,?,?,?,?,?)", (identifier, case_id, evidence_id, extractor_version, text, digest, evidence["sha256"], now()))
+            metadata = db.execute("SELECT * FROM workspace_document_pages WHERE extraction_id=?", (identifier,)).fetchone()
+            if metadata and (metadata["pages"] != canonical(pages) or metadata["status"] != status or metadata["warnings"] != canonical(warnings)):
+                raise InvalidInput("An extraction version's page provenance cannot be overwritten.")
+            if not metadata:
+                db.execute("INSERT INTO workspace_document_pages VALUES(?,?,?,?)", (identifier, canonical(pages), status, canonical(warnings)))
+            return {"id": identifier, "evidence_id": evidence_id, "extractor_version": extractor_version, "text_sha256": digest, "pages": pages, "status": status, "warnings": warnings}
+
     def candidate(self, case_id, label, context="", source_id=None):
         label = field(label, "Candidate label", 200)
         context = field(context, "Candidate context", 2000, required=False)
@@ -403,15 +593,15 @@ class Workspace:
             _event(db, case_id, None, "candidate_created", {"candidate_id": identifier})
             return dict(db.execute("SELECT * FROM workspace_candidates WHERE id=?", (identifier,)).fetchone())
 
-    def observe(self, case_id, evidence_id, candidate_id, quote, predicate="observation", value="", status="unconfirmed", *, start=None, end=None, extractor_version=EXTRACTOR_VERSION, relation="support", claim_id=None):
+    def observe(self, case_id, evidence_id, candidate_id, quote, predicate="observation", value="", status="unconfirmed", *, start=None, end=None, extractor_version=EXTRACTOR_VERSION, relation="support", claim_id=None, observed_at=""):
         if not isinstance(quote, str) or not quote.strip() or len(quote) > 10000 or "\x00" in quote:
             raise InvalidInput("Quote must be a nonempty exact text passage, up to 10000 characters.")
         predicate = field(predicate, "Predicate", 100)
         value = field(value, "Observation value", 2000, required=False)
         if status not in CLAIM_STATES or relation not in {"support", "contradict"}:
             raise InvalidInput("Choose a valid claim state and evidence relationship.")
-        if extractor_version != EXTRACTOR_VERSION:
-            raise InvalidInput("Unknown text extractor version.")
+        extractor_version = field(extractor_version, "Extractor version", 100)
+        observed_at = field(observed_at, "Observation date", 100, required=False)
         with self.engine.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             evidence = self._require(db, "evidence", case_id, evidence_id, "Evidence")
@@ -420,6 +610,15 @@ class Workspace:
             if evidence["source"].startswith("local-osint:"):
                 raise InvalidInput("Generated local reports cannot support source observations.")
             text = evidence["text"]
+            registered = db.execute("SELECT x.* FROM workspace_extractions x JOIN workspace_document_pages p ON p.extraction_id=x.id WHERE x.evidence_id=? ORDER BY x.created_at DESC LIMIT 1", (evidence_id,)).fetchone()
+            if extractor_version == EXTRACTOR_VERSION and registered:
+                extractor_version = registered["extractor_version"]
+                text = registered["text"]
+            elif extractor_version != EXTRACTOR_VERSION:
+                selected = db.execute("SELECT * FROM workspace_extractions WHERE evidence_id=? AND extractor_version=? ORDER BY created_at DESC LIMIT 1", (evidence_id, extractor_version)).fetchone()
+                if not selected:
+                    raise InvalidInput("Unknown text extractor version.")
+                text = selected["text"]
             if start is None:
                 start = text.find(quote)
                 if start < 0 or text.find(quote, start + 1) >= 0:
@@ -441,17 +640,78 @@ class Workspace:
                 if relation == "contradict":
                     db.execute("UPDATE workspace_claims SET status='disputed' WHERE id=?", (claim_id,))
             else:
-                claim_id = uuid.uuid4().hex
-                db.execute("INSERT INTO workspace_claims VALUES(?,?,?,?,?,?,?)", (claim_id, case_id, candidate_id, predicate, value, status, now()))
+                # Source mentions stay separate candidates. Only propositions already
+                # assigned to the exact same candidate can reconcile automatically.
+                key = hashlib.sha256(canonical([candidate_id, normalized(predicate), normalized(value), observed_at]).encode()).hexdigest() if candidate_id and value else None
+                existing = db.execute("SELECT id,status FROM workspace_claims WHERE case_id=? AND normalized_key=? ORDER BY created_at,id LIMIT 1", (case_id, key)).fetchone() if key else None
+                if existing:
+                    claim_id = existing["id"]
+                    if relation == "contradict":
+                        db.execute("UPDATE workspace_claims SET status='disputed' WHERE id=?", (claim_id,))
+                else:
+                    claim_id = uuid.uuid4().hex
+                    db.execute("INSERT INTO workspace_claims(id,case_id,candidate_id,predicate,value,status,created_at,normalized_key,observed_at) VALUES(?,?,?,?,?,?,?,?,?)", (claim_id, case_id, candidate_id, predicate, value, "disputed" if relation == "contradict" else status, now(), key, observed_at))
             db.execute("INSERT OR IGNORE INTO workspace_claim_refs VALUES(?,?,?,?,?,?,?)", (claim_id, extraction_id, evidence_id, relation, start, end, quote))
             _event(db, case_id, None, "observation_recorded", {"claim_id": claim_id, "evidence_id": evidence_id, "relation": relation})
             return self._claim(db, case_id, claim_id)
 
     def _claim(self, db, case_id, claim_id):
         claim = dict(self._require(db, "workspace_claims", case_id, claim_id, "Claim"))
-        claim["references"] = [dict(row) for row in db.execute("""SELECT r.*,x.extractor_version,x.text_sha256 AS extraction_sha256,x.evidence_sha256
-            FROM workspace_claim_refs r JOIN workspace_extractions x ON x.id=r.extraction_id WHERE claim_id=?""", (claim_id,))]
+        claim["references"] = []
+        for row in db.execute("""SELECT r.*,x.extractor_version,x.text_sha256 AS extraction_sha256,x.evidence_sha256,e.collected_at
+            FROM workspace_claim_refs r JOIN workspace_extractions x ON x.id=r.extraction_id
+            JOIN evidence e ON e.id=r.evidence_id WHERE claim_id=? ORDER BY e.collected_at,r.evidence_id,r.start""", (claim_id,)):
+            ref = dict(row)
+            ref["origin"] = self._origin(db, ref["evidence_id"])
+            document = db.execute("SELECT pages FROM workspace_document_pages WHERE extraction_id=?", (ref["extraction_id"],)).fetchone()
+            ref["pages"] = [page for page in json.loads(document[0]) if page["start"] < ref["end"] and page["end"] > ref["start"]] if document else []
+            claim["references"].append(ref)
+        return self._claim_independence(claim)
+
+    @staticmethod
+    def _claim_independence(claim):
+        independent = {ref["origin"]["independence_key"] for ref in claim["references"] if ref["relation"] == "support" and ref["origin"]["independence_key"]}
+        claim["independent_origins"] = len(independent)
+        claim["independent_sources"] = len(independent)
+        claim["corroborated"] = claim["status"] == "supported" and len(independent) >= 2
         return claim
+
+    def _project_claims(self, claims, candidates):
+        """Reconcile target propositions without changing stored identity or claims.
+
+        Only explicit Same target decisions provide the common identity scope.
+        Reversing that decision immediately separates the original propositions.
+        """
+        same_target = {candidate["id"] for candidate in candidates if candidate["status"] == "same"}
+        groups = {}
+        for claim in claims:
+            key = ("target", normalized(claim["predicate"]), normalized(claim["value"]), claim.get("observed_at", "")) if claim["candidate_id"] in same_target and claim["value"] else ("claim", claim["id"])
+            groups.setdefault(key, []).append(claim)
+        projected = []
+        for key, members in groups.items():
+            result = dict(members[0])
+            result["member_claim_ids"] = [member["id"] for member in members]
+            result["candidate_ids"] = list(dict.fromkeys(member["candidate_id"] for member in members if member["candidate_id"]))
+            result["identity_group"] = "target" if key[0] == "target" else "candidate"
+            references = {}
+            for member in members:
+                for reference in member["references"]:
+                    reference_key = tuple(reference[name] for name in ("evidence_id", "extraction_id", "relation", "start", "end"))
+                    if reference_key not in references:
+                        references[reference_key] = {**reference, "member_claim_ids": []}
+                    references[reference_key]["member_claim_ids"].append(member["id"])
+            result["references"] = list(references.values())
+            statuses = {member["status"] for member in members}
+            if "disputed" in statuses or any(reference["relation"] == "contradict" for reference in result["references"]) or {"supported", "rejected"} <= statuses:
+                result["status"] = "disputed"
+            elif "supported" in statuses:
+                result["status"] = "supported"
+            elif statuses == {"rejected"}:
+                result["status"] = "rejected"
+            else:
+                result["status"] = "unconfirmed"
+            projected.append(self._claim_independence(result))
+        return projected
 
     def retrieve(self, case_id, query="", candidate_id=None, limit=8):
         query = field(query, "Evidence search", 1000, required=False)
@@ -473,21 +733,50 @@ class Workspace:
                     rows = db.execute("SELECT e.* FROM workspace_search JOIN evidence e ON e.id=workspace_search.evidence_id WHERE " + scope + " AND workspace_search MATCH ? ORDER BY bm25(workspace_search),e.collected_at DESC LIMIT ?", (*params, match, limit)).fetchall()
                 except sqlite3.OperationalError:
                     pass
+            if tokens:
+                # Newly OCRed text is a separate immutable extraction; originals
+                # and their indicator offsets remain unchanged during reprocessing.
+                conditions = " OR ".join("instr(lower(x.text),lower(?))>0" for _ in tokens[:30])
+                extracted_rows = db.execute("SELECT DISTINCT e.* FROM evidence e JOIN workspace_extractions x ON x.evidence_id=e.id WHERE " + scope + " AND (" + conditions + ") ORDER BY e.collected_at DESC LIMIT ?", (*params, *tokens[:30], limit)).fetchall()
+                seen = {row["id"] for row in rows}
+                rows = [*rows, *(row for row in extracted_rows if row["id"] not in seen)]
             if not rows:
                 clauses = " AND (" + " OR ".join("instr(lower(e.text),lower(?))>0 OR instr(lower(e.title),lower(?))>0" for _ in tokens[:30]) + ")" if tokens else ""
                 token_params = [part for token in tokens[:30] for part in (token, token)]
                 rows = db.execute("SELECT e.* FROM evidence e WHERE " + scope + clauses + " ORDER BY e.collected_at DESC LIMIT ?", (*params, *token_params, limit)).fetchall()
             results = []
             for row in rows:
-                text = row["text"]
-                found = [text.lower().find(token.lower()) for token in tokens if text.lower().find(token.lower()) >= 0]
-                start = max(0, min(found) - 200) if found else 0
+                extraction = db.execute("SELECT x.extractor_version,x.text,p.pages FROM workspace_extractions x JOIN workspace_document_pages p ON p.extraction_id=x.id WHERE x.evidence_id=? ORDER BY x.created_at DESC LIMIT 1", (row["id"],)).fetchone()
+                text = extraction["text"] if extraction else row["text"]
+                lowered = text.lower()
+                occurrences = []
+                for token in dict.fromkeys(token.lower() for token in tokens):
+                    cursor = 0
+                    for _ in range(100):
+                        position = lowered.find(token, cursor)
+                        if position < 0:
+                            break
+                        occurrences.append((position, token))
+                        cursor = position + len(token)
+                # Prefer the passage answering the full question, rather than an
+                # early name mention that can hide a relevant late appendix.
+                best = max(occurrences, key=lambda occurrence: len({token for position, token in occurrences if abs(position - occurrence[0]) <= 650}), default=None)
+                start = max(0, best[0] - 200) if best else 0
                 end = min(len(text), start + 1800)
                 excerpt = text[start:end]
                 results.append({"id": row["id"], "evidence_id": row["id"], "title": row["title"], "source": row["source"],
                     "text": excerpt, "text_excerpt": excerpt, "start": start, "end": end, "extractor_version": EXTRACTOR_VERSION,
                     "extraction_sha256": hashlib.sha256(text.encode()).hexdigest(), "evidence_sha256": row["sha256"]})
-            return results
+                if extraction:
+                    results[-1]["extractor_version"] = extraction["extractor_version"]
+                    results[-1]["pages"] = [page for page in json.loads(extraction["pages"]) if page["start"] < end and page["end"] > start]
+                else:
+                    results[-1]["pages"] = []
+                results[-1]["origin"] = self._origin(db, row["id"])
+            if tokens:
+                query_tokens = set(token.lower() for token in tokens)
+                results.sort(key=lambda result: len({token for token in query_tokens if token in result["text"].lower()}), reverse=True)
+            return results[:limit]
 
     def health(self, case_id):
         with self.engine.connection() as db:
@@ -523,12 +812,20 @@ class Workspace:
         tasks = [self._task(row) for row in db.execute("SELECT * FROM workspace_tasks WHERE case_id=? ORDER BY priority DESC,created_at,id", (case_id,))]
         candidates = [dict(row) for row in db.execute("SELECT * FROM workspace_candidates WHERE case_id=? ORDER BY created_at,id", (case_id,))]
         claims = [self._claim(db, case_id, row["id"]) for row in db.execute("SELECT id FROM workspace_claims WHERE case_id=? ORDER BY created_at,id", (case_id,)).fetchall()]
+        claims = self._project_claims(claims, candidates)
         row = db.execute("SELECT settings FROM workspace_settings WHERE case_id=?", (case_id,)).fetchone()
         health = [dict(item) for item in db.execute("SELECT * FROM workspace_health WHERE case_id=? ORDER BY connector", (case_id,))]
         events = [{**dict(item), "detail": json.loads(item["detail"])} for item in db.execute("SELECT * FROM workspace_events WHERE case_id=? ORDER BY id", (case_id,))]
-        return {"tasks": tasks, "candidates": candidates, "claims": claims, "settings": json.loads(row[0]) if row else {},
+        questions = [self._question(item) for item in db.execute("SELECT * FROM workspace_questions WHERE case_id=? ORDER BY created_at,id", (case_id,))]
+        decisions = [dict(item) for item in db.execute("SELECT * FROM workspace_identity_decisions WHERE case_id=? ORDER BY created_at,id", (case_id,))]
+        origins = [self._origin(db, item[0]) for item in db.execute("SELECT id FROM evidence WHERE case_id=? AND source NOT LIKE 'local-osint:%' ORDER BY collected_at,id", (case_id,))]
+        return {"tasks": tasks, "candidates": candidates, "claims": claims, "questions": questions, "identity_decisions": decisions, "origins": origins, "settings": json.loads(row[0]) if row else {},
             "health": health, "events": events, "counts": {"tasks": len(tasks), "candidates": len(candidates), "claims": len(claims),
                 "leads": len(candidates),
                 "readable_documents": len({ref["evidence_id"] for claim in claims if claim["predicate"] == "readable_document" for ref in claim["references"]}),
-                "corroborated_claims": sum(claim["status"] == "supported" and len({ref["evidence_id"] for ref in claim["references"] if ref["relation"] == "support"}) >= 2 for claim in claims),
+                "corroborated_claims": sum(claim["corroborated"] for claim in claims),
+                "questions": len(questions),
+                "unresolved_questions": sum(question["status"] == "unresolved" for question in questions),
+                "established_origins": len({origin["independence_key"] for origin in origins if origin["independence_key"]}),
+                "unknown_origins": sum(not origin["established"] for origin in origins),
                 **{state: sum(task["state"] == state for task in tasks) for state in sorted(TASK_STATES)}}}

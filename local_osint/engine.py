@@ -18,7 +18,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 MAX_BYTES = 2 * 1024 * 1024
 MAX_ENTITIES = 10000
-FORMATS = {"text", "html", "json", "csv"}
+FORMATS = {"text", "html", "json", "csv", "pdf", "docx", "odt", "png", "jpeg", "tiff"}
 FOCUS_TYPES = {"person", "organization", "domain", "topic", "other"}
 KINDS = {"email", "domain", "url", "ipv4", "ipv6"}
 DOMAIN = r"(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}"
@@ -78,9 +78,12 @@ class PlainHTML(HTMLParser):
 
 def searchable_text(raw, format):
     if format not in FORMATS:
-        raise InvalidInput("Choose text, HTML, JSON or CSV.")
+        raise InvalidInput("Choose text, HTML, JSON, CSV, PDF, DOCX, ODT, PNG, JPEG or TIFF.")
     if not isinstance(raw, bytes) or not raw or len(raw) > MAX_BYTES:
         raise InvalidInput("Evidence must contain 1 byte to 2 MiB.")
+    from .documents import FORMATS as DOCUMENT_FORMATS, extract as extract_document
+    if format in DOCUMENT_FORMATS:
+        return extract_document(raw, format)["text"]
     try:
         text = raw.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
@@ -195,7 +198,7 @@ class Engine:
             os.close(fd)
         with self.connection() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2):
+            if version not in (0, 1, 2, 3):
                 raise InvalidInput("Unsupported database version. Restore a compatible backup.")
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS cases (
@@ -265,12 +268,22 @@ class Engine:
             raise InvalidInput("Case not found. Choose an existing case.")
         return Engine.case_record(case)
 
-    def ingest(self, case_id, raw, title, source="Imported file", format="text", extract=True):
+    def ingest(self, case_id, raw, title, source="Imported file", format="text", extract=True, document_options=None):
         title = field(title, "Evidence title")
         source = field(source, "Source", 2000)
         if source.startswith('local-osint:') and extract:
             raise InvalidInput('This source prefix is reserved for generated local reports.')
-        text = searchable_text(raw, format)
+        with self.connection() as db:
+            self.require_case(db, case_id)
+        from .documents import FORMATS as DOCUMENT_FORMATS, extract as extract_document
+        document = None
+        if format in DOCUMENT_FORMATS:
+            if document_options is not None and (not isinstance(document_options, dict) or set(document_options) - {"ocr", "language"}):
+                raise InvalidInput("Document options accept only OCR on/off and installed language codes.")
+            document = extract_document(raw, format, **(document_options or {}))
+            text = document["text"]
+        else:
+            text = searchable_text(raw, format)
         found = indicators(text) if extract else []
         digest = hashlib.sha256(raw).hexdigest()
         with self.connection() as db:
@@ -286,7 +299,27 @@ class Engine:
                 db.execute("INSERT OR IGNORE INTO entities VALUES (?,?,?,?)", (uuid.uuid4().hex, case_id, item["kind"], item["value"]))
                 entity_id = db.execute("SELECT id FROM entities WHERE case_id=? AND kind=? AND value=?", (case_id, item["kind"], item["value"])).fetchone()[0]
                 db.execute("INSERT OR IGNORE INTO mentions VALUES (?,?,?,?)", (entity_id, evidence_id, item["start"], item["end"]))
-        return {"id": evidence_id, "duplicate": False, "mentions": len(found)}
+        result = {"id": evidence_id, "duplicate": False, "mentions": len(found)}
+        if document is not None:
+            from .workspace import Workspace
+            record = Workspace(self).record_extraction(case_id, evidence_id, **document)
+            result["document"] = {key: value for key, value in document.items() if key != "text"}
+            result["extraction"] = record
+        return result
+
+    def reextract(self, case_id, evidence_id, document_options=None):
+        """Create another versioned extraction; never change the original row."""
+        from .documents import FORMATS as DOCUMENT_FORMATS, extract as extract_document
+        from .workspace import Workspace
+        if document_options is not None and (not isinstance(document_options, dict) or set(document_options) - {"ocr", "language"}):
+            raise InvalidInput("Document options accept only OCR on/off and installed language codes.")
+        with self.connection() as db:
+            self.require_case(db, case_id)
+            row = db.execute("SELECT raw,format FROM evidence WHERE case_id=? AND id=?", (case_id, evidence_id)).fetchone()
+        if not row or row["format"] not in DOCUMENT_FORMATS:
+            raise InvalidInput("Choose a saved PDF, office document or image from this case.")
+        document = extract_document(row["raw"], row["format"], **(document_options or {}))
+        return {"id": evidence_id, "document": {key: value for key, value in document.items() if key != "text"}, "extraction": Workspace(self).record_extraction(case_id, evidence_id, **document)}
 
     def view(self, case_id, query="", kind=""):
         query = field(query, "Search", 200, required=False)
@@ -317,6 +350,12 @@ class Engine:
             result = dict(row)
             result["mentions"] = [dict(x) for x in db.execute("""SELECT e.kind,e.value,m.start,m.end FROM mentions m
                 JOIN entities e ON e.id=m.entity_id WHERE m.evidence_id=? ORDER BY m.start""", (evidence_id,))]
+            if result["format"] in {"pdf", "docx", "odt", "png", "jpeg", "tiff"}:
+                extraction = db.execute("""SELECT x.id,x.extractor_version,x.text,p.pages,p.status,p.warnings
+                    FROM workspace_extractions x JOIN workspace_document_pages p ON p.extraction_id=x.id
+                    WHERE x.case_id=? AND x.evidence_id=? ORDER BY x.created_at DESC,x.id DESC LIMIT 1""", (case_id, evidence_id)).fetchone()
+                if extraction:
+                    result["document"] = {**dict(extraction), "pages": json.loads(extraction["pages"]), "warnings": json.loads(extraction["warnings"])}
             return result
 
     def entity(self, case_id, entity_id):
@@ -349,9 +388,18 @@ class Engine:
             entities = [dict(x) for x in db.execute("SELECT * FROM entities WHERE case_id=? ORDER BY kind,value", (case_id,))]
             mentions = [dict(x) for x in db.execute("SELECT m.* FROM mentions m JOIN evidence e ON m.evidence_id=e.id WHERE e.case_id=? ORDER BY m.evidence_id,m.start", (case_id,))]
             workspace = Workspace(self).snapshot(case_id, connection=db)
+            extractions = []
+            for row in db.execute("""SELECT x.*,p.pages,p.status,p.warnings FROM workspace_extractions x
+                    LEFT JOIN workspace_document_pages p ON p.extraction_id=x.id
+                    WHERE x.case_id=? ORDER BY x.created_at,x.id""", (case_id,)):
+                item = dict(row)
+                item['pages'] = json.loads(item['pages']) if item['pages'] is not None else []
+                item['warnings'] = json.loads(item['warnings']) if item['warnings'] is not None else []
+                item['status'] = item['status'] or 'ready'
+                extractions.append(item)
         reports = [json.loads(item['text']) for item in evidence if item['source'] == 'local-osint:investigation-report']
-        return {"schema_version": 2, "exported_at": now(), "case": case, "evidence": evidence, "entities": entities, "mentions": mentions,
-                "workspace": workspace,
+        return {"schema_version": 3, "exported_at": now(), "case": case, "evidence": evidence, "entities": entities, "mentions": mentions,
+                "workspace": workspace, "extractions": extractions,
                 "investigation": reports[-1] if reports else None,
                 "interpretation": "Indicators are extracted mentions. Shared sources do not establish ownership or identity."}
 

@@ -4,11 +4,13 @@ from contextlib import closing
 import hashlib
 import http.client
 import json
+import io
 from pathlib import Path
 import tempfile
 import threading
 import time
 import unittest
+import zipfile
 from unittest.mock import patch
 
 from local_osint.engine import Engine
@@ -117,6 +119,61 @@ class SourceAPIJourneyTests(unittest.TestCase):
             self.assertEqual(retried['attempts'], 2)
             self.assertEqual(len(retried['attempt_history']), 2)
             self.assertEqual(network.call_count, 2)
+
+    def test_single_investigate_selects_sources_and_preserves_ai_opt_out_on_continue(self):
+        raw = b'<article>Bea Public coordinates the Harbour Workshop volunteer programme. This public staff introduction describes community repair events, public training and civic activities.</article>'
+        def search(engine, case_id, query, enabled, **kwargs):
+            saved = engine.ingest(case_id, b'{"fixture":"public search"}', 'Search original', format='json')
+            return {**saved, 'results': [{'url': 'https://civic.example.org/bea', 'title': 'Bea Public staff introduction', 'snippet': 'Bea Public coordinates volunteer training.'}]}
+        empty = {'status': 'empty', 'summary': 'No further public leads.', 'evidence_ids': [], 'leads': [], 'observations': []}
+        with patch('local_osint.collector.web_search', side_effect=search) as searches, \
+                patch('local_osint.collector.fetch_public', return_value=(raw, 'html', 'https://civic.example.org/bea')), \
+                patch('local_osint.connectors.execute', return_value=empty), \
+                patch.object(self.server.ai, 'start') as model, patch('local_osint.collector.discover') as encyclopedia:
+            self.assertEqual(self.request('/api/investigate', {'case': self.case, 'ai': False})[0], 202)
+            first = self.wait()
+            self.assertTrue(first['options']['automatic'])
+            self.assertGreater(first['quality_count'], 0)
+            before = searches.call_count
+            self.assertEqual(self.request('/api/continue', {'case': self.case, 'ai': False})[0], 202)
+            second = self.wait()
+            self.assertEqual(searches.call_count, before)
+            self.assertEqual(first['source_ids'], second['source_ids'])
+            model.assert_not_called()
+            encyclopedia.assert_not_called()
+        self.assertTrue(self.request('/api/workspace?case=' + self.case)[1]['questions'])
+
+    def test_document_reextract_and_identity_decision_are_local_case_scoped_and_reversible(self):
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, 'w') as archive:
+            archive.writestr('word/document.xml', '<w:document xmlns:w="urn:word"><w:p><w:t>Bea Public coordinates the public volunteer programme.</w:t></w:p></w:document>')
+        raw = output.getvalue()
+        code, saved = self.request('/api/import', {'case': self.case, 'title': 'Public programme', 'format': 'docx', 'original_base64': base64.b64encode(raw).decode()})
+        self.assertEqual(code, 201)
+        source = self.engine.evidence(self.case, saved['id'])
+        candidate = self.server.workspace.candidate(self.case, 'Bea Public', source_id=saved['id'])
+        objective = self.server.workspace.question(self.case, 'What work does Bea Public do?', key='objective', status='supported', evidence_ids=[saved['id']])
+        identity = self.server.workspace.question(self.case, 'Which candidate matches?', key='identity')
+        with patch('local_osint.collector.fetch_public') as outbound:
+            for decision in ['same', 'uncertain']:
+                code, value = self.request('/api/candidate/decision', {'case': self.case, 'candidate': candidate['id'], 'status': decision})
+                self.assertEqual(code, 200)
+                self.assertEqual(value['status'], decision)
+                questions = {item['id']: item for item in self.server.workspace.questions(self.case)}
+                self.assertEqual(questions[identity['id']]['status'], 'supported' if decision == 'same' else 'unresolved')
+            self.request('/api/candidate/decision', {'case': self.case, 'candidate': candidate['id'], 'status': 'different'})
+            questions = {item['id']: item for item in self.server.workspace.questions(self.case)}
+            self.assertEqual(questions[objective['id']]['status'], 'unresolved')
+            self.assertEqual(questions[objective['id']]['evidence_ids'], [saved['id']])
+            self.assertEqual(self.request('/api/document/reextract', {'case': self.case, 'id': saved['id'], 'document_options': {'ocr': True}})[0], 200)
+            outbound.assert_not_called()
+        self.assertEqual(self.engine.evidence(self.case, saved['id'])['sha256'], source['sha256'])
+        self.assertEqual(self.engine.evidence(self.case, saved['id'])['text'], source['text'])
+        other = self.engine.create_case('Other case')['id']
+        for path, body in [('/api/candidate/decision', {'case': other, 'candidate': candidate['id'], 'status': 'same'}),
+                           ('/api/document/reextract', {'case': other, 'id': saved['id']})]:
+            self.assertEqual(self.request(path, body)[0], 400)
+            self.assertEqual(self.request(path, body, auth=False)[0], 401)
 
 
 if __name__ == '__main__':

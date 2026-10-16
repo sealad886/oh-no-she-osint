@@ -127,7 +127,7 @@ class ServerTests(unittest.TestCase):
             return b'{"articles":[]}', 'json', url
         with patch('local_osint.collector.fetch_public', side_effect=public):
             self.assertEqual(self.request('/api/investigate', {'case': case['id']}, authenticated=False)[0], 401)
-            response = self.request('/api/investigate', {'case': case['id'], 'options': {'tools': ['wikipedia', 'wikidata', 'news']}})
+            response = self.request('/api/investigate', {'case': case['id'], 'ai': False})
             self.assertEqual(response[0], 202)
             for _ in range(100):
                 report = self.request('/api/investigation?case=' + case['id'])[2]
@@ -137,7 +137,8 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(report['status'], 'partial')
             self.assertEqual(report['quality_count'], 0)
             self.assertEqual(report['case_id'], case['id'])
-            self.assertEqual(len(report['source_ids']), 3)
+            self.assertTrue(report['options']['automatic'])
+            self.assertTrue(report['questions'])
         self.assertEqual(self.request('/api/stop', {'case': 'other', 'run_id': report['run_id']})[0], 400)
         exported = self.request('/api/export?case=' + case['id'])[2]
         self.assertEqual(exported['investigation']['run_id'], report['run_id'])
@@ -157,7 +158,7 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(self.request('/api/continue', payload, authenticated=False)[0], 401)
             start.assert_not_called()
             self.assertEqual(self.request('/api/continue', payload)[0], 202)
-            start.assert_called_once_with('saved-case', options=payload['options'], continuing=True)
+            start.assert_called_once_with('saved-case', True, options={**payload['options'], 'automatic': True}, continuing=True)
 
     def test_tool_retry_has_authentication_single_job_and_retained_history(self):
         self.server.jobs.enabled = True

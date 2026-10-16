@@ -1,7 +1,8 @@
 'use strict';
 const $ = id => document.getElementById(id);
-let currentCase = '', currentSubject = '', optionsCase = '', status = {}, requestVersion = 0, aiReady = false;
+let currentCase = '', currentSubject = '', optionsCase = '', status = {}, requestVersion = 0, detailVersion = 0, aiReady = false;
 let promptDefaults = {}, searchProviders = [];
+let atlasEvidence = {caseId: '', items: []};
 const promptLabels = {plan: 'Plan the next useful action', repetition: 'Recover from repeated or stalled actions', provider_failure: 'Recover from search-provider failure', no_useful_pages: 'Recover when pages are not useful', identity_ambiguity: 'Handle uncertain identity matches', draft: 'Write the final sourced draft', action: 'Choose the next queued action', extract: 'Extract observations with exact supporting passages'};
 
 function node(tag, text, className) {
@@ -97,8 +98,9 @@ async function refresh() {
   const caseId = currentCase;
   const data = await api('/api/view?' + new URLSearchParams({case: caseId, q: $('search').value, kind: $('kind').value}));
   if (version !== requestVersion || currentCase !== caseId) return;
+  atlasEvidence = {caseId, items: data.evidence || []};
   $('case-title').textContent = data.case.name;
-  $('subject-summary').textContent = [data.case.focus_type.toUpperCase(), data.case.aliases.length ? 'Aliases: ' + data.case.aliases.join(', ') : '', data.case.identifiers.length ? 'Known identifiers (user supplied): ' + data.case.identifiers.join(', ') : ''].filter(Boolean).join(' · ');
+  $('subject-summary').textContent = [data.case.focus_type.toUpperCase(), data.case.aliases.length ? 'Aliases: ' + data.case.aliases.join(', ') : '', data.case.identifiers.length ? `${data.case.identifiers.length} private comparison clue${data.case.identifiers.length === 1 ? '' : 's'} · used locally` : ''].filter(Boolean).join(' · ');
   currentSubject = data.case.name;
   const loadOptions = optionsCase !== caseId;
   if (loadOptions) {
@@ -126,14 +128,40 @@ function detail(title) {
   return area;
 }
 async function showEvidence(caseId, id) {
+  const version = ++detailVersion;
   const evidence = await api('/api/evidence?' + new URLSearchParams({case: caseId, id}));
-  if (currentCase !== caseId) return;
+  if (currentCase !== caseId || detailVersion !== version) return;
   const area = detail(evidence.title);
-  area.append(node('p', 'Source: ' + evidence.source, 'detail-meta'), node('p', 'Collected: ' + evidence.collected_at, 'detail-meta'), node('p', 'SHA-256: ' + evidence.sha256, 'detail-meta'), node('pre', evidence.text, 'evidence-text'), node('p', `${evidence.mentions.length} indicator mentions. Offsets refer to extracted searchable text; original bytes are in the evidence export.`, 'small'));
+  area.append(node('p', 'Source: ' + evidence.source, 'detail-meta'), node('p', 'Collected: ' + evidence.collected_at, 'detail-meta'), node('p', 'Original SHA-256: ' + evidence.sha256, 'detail-meta'));
+  const document = evidence.document;
+  if (document) {
+    const pages = document.pages || [], extractionStatus = node('p', 'Local extraction: ' + (document.status || 'unknown') + ` · ${pages.length} page${pages.length === 1 ? '' : 's'}`, 'small');
+    extractionStatus.setAttribute('role', 'status'); area.append(extractionStatus);
+    for (const warning of document.warnings || []) area.append(node('p', String(warning), 'step-error'));
+    area.append(node('p', 'Original document bytes remain intact. Retrying creates a local versioned extraction; it does not upload the document or replace earlier cited passages.', 'small muted'));
+    const retry = node('button', 'Retry local extraction', 'secondary'); retry.type = 'button'; retry.dataset.documentReextract = id;
+    action(retry, async () => {
+      if (currentCase !== caseId) throw new Error('Select this evidence again in the current case.');
+      const previous = extractionStatus.textContent; extractionStatus.textContent = 'Reading document text locally…';
+      try {
+        await api('/api/document/reextract', {case: caseId, id, document_options: {ocr: true}});
+        if (currentCase === caseId && detailVersion === version && $('detail-dialog').open) await showEvidence(caseId, id);
+        notice('Local extraction finished. Original document bytes and previous citations are preserved.');
+      } finally { if (detailVersion === version) extractionStatus.textContent = previous; }
+    });
+    area.append(retry);
+    if (pages.length) {
+      const pageDetails = node('details'); pageDetails.append(node('summary', 'Extracted document pages'));
+      for (const page of pages) pageDetails.append(node('p', `Page ${page.page} · extracted characters ${page.start}–${page.end}`, 'small'));
+      area.append(pageDetails);
+    }
+  }
+  area.append(node('pre', typeof document?.text === 'string' ? document.text : evidence.text, 'evidence-text'), node('p', `${evidence.mentions?.length || 0} indicator mentions. Offsets refer to extracted text; original bytes are retained in the evidence export.`, 'small'));
 }
 async function showEntity(caseId, id) {
+  const version = ++detailVersion;
   const entity = await api('/api/entity?' + new URLSearchParams({case: caseId, id}));
-  if (currentCase !== caseId) return;
+  if (currentCase !== caseId || detailVersion !== version) return;
   const area = detail(entity.value);
   area.append(node('p', entity.kind.toUpperCase() + ' / EXTRACTED MENTION', 'eyebrow'), node('h3', 'Where it appears'));
   for (const evidence of entity.evidence) area.append(resultButton('source', evidence.title, 'Open ↗', () => showEvidence(caseId, evidence.id)));
@@ -162,9 +190,12 @@ for (const id of ['new-case', 'first-case']) action($(id), () => { $('case-dialo
 action($('cancel-case'), () => $('case-dialog').close());
 action($('close-detail'), () => $('detail-dialog').close());
 action($('case-form'), async () => {
+  const publicFocus = {question: $('case-question')?.value.trim() || '', public_country: $('case-country')?.value.trim() || '', public_language: $('case-language')?.value.trim() || '', public_organization: $('case-organization')?.value.trim() || ''};
   const created = await api('/api/cases', {name: $('case-name').value, focus_type: $('focus-type').value, aliases: $('aliases').value.split('\n').map(x => x.trim()).filter(Boolean), identifiers: $('identifiers').value.split('\n').map(x => x.trim()).filter(Boolean)});
   $('case-dialog').close(); $('case-form').reset(); $('search').value = ''; $('kind').value = '';
   await loadCases(created.id);
+  for (const [id, key] of [['investigation-question', 'question'], ['public-country', 'public_country'], ['public-language', 'public_language'], ['public-organization', 'public_organization']]) if ($(id)) $(id).value = publicFocus[key];
+  $('use-ai').checked = true;
   if (status.network) await startInvestigation(created.id);
   else notice('Offline case created. Import saved evidence to begin.');
 }, 'submit');
@@ -172,11 +203,15 @@ action($('case-select'), async () => { currentCase = $('case-select').value; $('
 let searchTimer;
 $('search').addEventListener('input', () => { clearTimeout(searchTimer); ++requestVersion; searchTimer = setTimeout(() => refresh().catch(error => notice(error.message)), 220); });
 action($('kind'), refresh, 'change');
+function fileFormat(file) {
+  const extension = file.name.split('.').pop().toLowerCase();
+  return ({html: 'html', htm: 'html', json: 'json', csv: 'csv', pdf: 'pdf', docx: 'docx', odt: 'odt', png: 'png', jpg: 'jpeg', jpeg: 'jpeg', tif: 'tiff', tiff: 'tiff'})[extension] || ({'application/pdf': 'pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx', 'application/vnd.oasis.opendocument.text': 'odt', 'image/png': 'png', 'image/jpeg': 'jpeg', 'image/tiff': 'tiff'})[file.type] || 'text';
+}
 $('file').addEventListener('change', () => {
   const file = $('file').files[0];
   if (!file) return;
   $('title').value = file.name;
-  $('format').value = ({html: 'html', htm: 'html', json: 'json', csv: 'csv'})[file.name.split('.').pop().toLowerCase()] || 'text';
+  $('format').value = fileFormat(file);
 });
 action($('import-form'), async () => {
   const caseId = currentCase, file = $('file').files[0], pasted = $('paste').value;
@@ -185,8 +220,9 @@ action($('import-form'), async () => {
   if (file && file.size > status.max_bytes) throw new Error('File exceeds the 2 MiB evidence limit.');
   const bytes = file ? new Uint8Array(await file.arrayBuffer()) : new TextEncoder().encode(pasted);
   if (bytes.length > status.max_bytes) throw new Error('Notes exceed the 2 MiB evidence limit.');
-  const imported = await api('/api/import', {case: caseId, title: $('title').value, source: $('source').value.trim() || (file ? file.name : 'Pasted notes'), format: $('format').value, original_base64: base64(bytes)});
-  if (currentCase === caseId) { $('import-form').reset(); await refresh(); }
+  const format = $('format').value;
+  const imported = await api('/api/import', {case: caseId, title: $('title').value, source: $('source').value.trim() || (file ? file.name : 'Pasted notes'), format, original_base64: base64(bytes), ...(['pdf', 'docx', 'odt', 'png', 'jpeg', 'tiff'].includes(format) ? {document_options: {ocr: true}} : {})});
+  if (currentCase === caseId) { $('import-form').reset(); await refresh(); if (['pdf', 'docx', 'odt', 'png', 'jpeg', 'tiff'].includes(format)) await showEvidence(caseId, imported.id); }
   notice(imported.duplicate ? 'Already in this case. Original evidence kept.' : `Evidence saved. ${imported.mentions} indicator mentions found.`);
 }, 'submit');
 action($('export-json'), () => download('json'));
@@ -210,7 +246,7 @@ for (const [index, id] of ['indicators-tab', 'sources-tab'].entries()) $(id).add
     pageLeaseEnabled = true;
     await openPageLease();
     $('mode').textContent = status.network ? 'LOCAL PROCESSING' : 'OFFLINE MODE';
-    $('create-investigation').textContent = status.network ? 'Start investigation ↗' : 'Create offline case';
+    $('create-investigation').textContent = status.network ? 'Investigate ↗' : 'Create offline case';
     $('start-notice').hidden = !status.network;
     $('run-investigation').disabled = !status.network;
     await loadPromptSettings();
@@ -250,6 +286,7 @@ function providerLabel(value) {
 function setOptions(options = {}) {
   $('investigation-query').value = options.query || ('"' + currentSubject + '"');
   $('investigation-context').value = options.context || '';
+  for (const [id, key] of [['investigation-question', 'question'], ['public-country', 'public_country'], ['public-language', 'public_language'], ['public-organization', 'public_organization']]) if ($(id)) $(id).value = options[key] || '';
   $('request-limit').value = options.max_requests || 24;
   $('page-limit').value = options.page_limit || 4;
   const tools = options.tools || ['web_search', 'wikipedia', 'wikidata', 'news', 'domain'];
@@ -257,8 +294,8 @@ function setOptions(options = {}) {
   setRecoveryOptions(options);
 }
 function getOptions() {
-  const tools = [...document.querySelectorAll('[name="investigation-tool"]:checked')].map(input => input.value);
-  if (!tools.length) throw new Error('Select at least one investigation tool.');
+  const selectedTools = [...document.querySelectorAll('[name="investigation-tool"]:checked')].map(input => input.value);
+  const tools = selectedTools.length ? selectedTools : ['web_search', 'wikipedia', 'wikidata', 'news', 'domain'];
   for (const id of ['request-limit', 'page-limit']) if (!$(id).reportValidity()) throw new Error('Check the investigation limits.');
   if (['request-limit', 'page-limit'].some(id => !Number.isSafeInteger(Number($(id).value)))) throw new Error('Use whole numbers within the browser’s exact integer range for investigation limits.');
   const providers = [...document.querySelectorAll('[name="search-provider"]:checked')].map(input => input.value);
@@ -268,7 +305,7 @@ function getOptions() {
     if ($('prompt-' + key).value.length > 4000) throw new Error('Each AI prompt must be at most 4,000 characters.');
     prompts[key] = $('prompt-' + key).value;
   }
-  return {query: $('investigation-query').value.trim(), context: $('investigation-context').value.trim(), tools, providers, prompts, max_requests: Number($('request-limit').value), page_limit: Number($('page-limit').value)};
+  return {automatic: true, question: $('investigation-question')?.value.trim() || '', public_country: $('public-country')?.value.trim() || '', public_language: $('public-language')?.value.trim() || '', public_organization: $('public-organization')?.value.trim() || '', query: $('investigation-query').value.trim(), context: $('investigation-context').value.trim(), tools, providers, prompts, max_requests: Number($('request-limit').value), page_limit: Number($('page-limit').value)};
 }
 function updateRunControls() {
   const busy = displayedRun?.status === 'running';
@@ -288,11 +325,12 @@ async function startInvestigation(caseId) {
   notice('Investigation started. Sources and progress appear below.');
   const report = await api('/api/investigate', {case: caseId, ai: $('use-ai').checked, options: getOptions()});
   if (currentCase === caseId) renderRun(report, caseId);
+  await refreshAI();
 }
 async function continueInvestigation(caseId) {
   await saveSourceSettings(caseId);
-  notice('Continuing from saved evidence. Local AI will plan the next useful sources.');
-  const report = await api('/api/continue', {case: caseId, options: getOptions()});
+  notice($('use-ai').checked ? 'Continuing from saved evidence. Local AI will plan the next useful sources.' : 'Continuing the automatic investigation from saved evidence and remaining public sources.');
+  const report = await api('/api/continue', {case: caseId, ai: $('use-ai').checked, options: getOptions()});
   if (currentCase === caseId) renderRun(report, caseId);
   await refreshAI();
 }
@@ -414,13 +452,20 @@ function renderRun(report, caseId) {
   }
   clearTimeout(runTimer);
   displayedRun = report;
+  if (atlasState?.caseId === caseId) renderEvidenceAtlas(atlasState.workspace, caseId);
   const running = report?.status === 'running';
   const steps = report?.steps || [], budget = report?.budget || {used: report?.request_units || 0, limit: report?.options?.max_requests || 24};
   const currentSteps = steps.some(step => step.run_id) ? steps.filter(step => step.run_id === report.run_id) : steps;
   const usefulPages = Number.isFinite(report?.quality_count) ? report.quality_count : (report?.pages || []).filter(page => page.useful === true && (!page.run_id || page.run_id === report.run_id)).length;
-  const qualityProgress = report && (Number.isFinite(report.quality_count) || report.pages?.some(page => typeof page.useful === 'boolean')) ? ` · ${usefulPages} useful pages (goal ${report.options?.page_limit || 4})` : '';
+  const qualityProgress = report && (Number.isFinite(report.quality_count) || report.pages?.some(page => typeof page.useful === 'boolean')) ? ` · ${usefulPages} useful pages (${report.options?.automatic ? 'ceiling' : 'goal'} ${report.options?.page_limit || 4})` : '';
   $('run-progress').textContent = report ? `${report.stage || report.status} · ${currentSteps.filter(s => s.ok || s.status === 'success').length} successful tool calls${qualityProgress} · ${budget.used} collection units used (ceiling ${budget.limit})` : 'Enter a subject and run an investigation. No manual evidence required.';
-  $('run-stop-reason').textContent = report?.stop_reason || (report && !running ? 'The selected work finished. The request ceiling is a safety limit, not a completion target. See individual tool outcomes below.' : '');
+  $('run-stop-reason').textContent = report?.stop_reason || report?.error || (report && !running ? 'The selected work finished. The request ceiling is a safety limit, not a completion target. See individual tool outcomes below.' : '');
+  const assessment = $('findings-assessment'); assessment.replaceChildren();
+  if (report?.ai?.summary) {
+    assessment.append(node('h4', report.ai.method === 'verified_passages' ? 'Verified source passages · identity unconfirmed' : 'Local AI assessment — unverified'), node('pre', report.ai.summary, 'evidence-text'));
+    if (report.ai.status !== 'draft') assessment.append(node('p', 'Analysis is ' + report.ai.status + '. Inspect the remaining gaps and original sources.', 'small muted'));
+    for (const id of report.ai.source_ids || []) sourceLink(assessment, caseId, id, 'Assessment evidence');
+  }
   renderContinuation(report);
   renderActivity(report, caseId);
   const area = $('dossier'); area.replaceChildren();
@@ -526,12 +571,13 @@ async function refreshAI() {
   const ai = await api('/api/ai');
   aiReady = ai.state === 'ready';
   $('ai-status').textContent = 'Local AI: ' + ai.state + (ai.error ? ' · ' + ai.error : '');
-  $('use-ai').disabled = ai.state !== 'ready';
-  if (ai.state !== 'ready') $('use-ai').checked = false;
+  // An investigation can start the cached model in its worker; readiness must
+  // not turn off the user's analysis preference before the worker starts it.
+  $('use-ai').disabled = false;
   $('start-ai').disabled = ['ready', 'loading'].includes(ai.state);
   $('stop-ai').hidden = !['ready', 'loading'].includes(ai.state);
   updateRunControls();
-  if (ai.state === 'loading' || displayedRun?.status === 'running' && displayedRun?.continuation) aiTimer = setTimeout(() => refreshAI().catch(error => notice(error.message)), 1500);
+  if (ai.state === 'loading' || displayedRun?.status === 'running' && (displayedRun?.continuation || displayedRun?.options?.automatic)) aiTimer = setTimeout(() => refreshAI().catch(error => notice(error.message)), 1500);
 }
 let toolCase = '';
 function toolField(area, label, id, value = '', attributes = {}) {
@@ -702,6 +748,10 @@ function renderSearchService(service) {
 function researchAction(area, label, callback) {
   const button = node('button', label, 'secondary'); button.type = 'button'; action(button, callback); area.append(button); return button;
 }
+function pageReferenceLabel(pages = []) {
+  const numbers = [...new Set(pages.map(page => typeof page === 'object' ? page.page : page).filter(value => Number.isInteger(value) && value > 0))];
+  return numbers.length ? 'Page' + (numbers.length === 1 ? ' ' : 's ') + numbers.join(', ') : '';
+}
 function renderResearch(workspace, caseId) {
   const tasks = workspace.tasks || [], counts = workspace.counts || {};
   const pending = tasks.filter(task => ['pending', 'planned', 'queued', 'running', 'cooldown', 'interrupted', 'interrupted_after_dispatch', 'blocked'].includes(task.state || task.status));
@@ -758,7 +808,21 @@ function renderResearch(workspace, caseId) {
   for (const candidate of workspace.candidates || []) {
     const card = node('article', undefined, 'tool-step'); card.append(node('p', 'CANDIDATE · ' + (candidate.status || 'UNVERIFIED'), 'eyebrow'), node('h3', candidate.label || candidate.name || candidate.id));
     if (candidate.context) card.append(node('p', typeof candidate.context === 'string' ? candidate.context : JSON.stringify(candidate.context), 'small'));
+    const origin = candidate.source_origin || candidate.origin || candidate.source_url;
+    if (origin) card.append(node('p', 'Discovered in: ' + (typeof origin === 'string' ? origin : JSON.stringify(origin)), 'small muted candidate-origin'));
     for (const id of [...new Set([...(candidate.evidence_ids || []), candidate.source_id].filter(Boolean))]) sourceLink(card, caseId, id, 'Candidate evidence');
+    const decisions = node('div', undefined, 'tool-actions candidate-decisions');
+    for (const [decision, label] of [['same', 'Same target'], ['different', 'Different target'], ['uncertain', 'Unsure']]) {
+      const button = researchAction(decisions, label, async () => {
+        if (currentCase !== caseId) throw new Error('Select the candidate again for the current case.');
+        await api('/api/candidate/decision', {case: caseId, candidate: candidate.id, status: decision});
+        await refreshResearch(caseId);
+        if (currentCase === caseId) notice('Candidate decision saved locally. Cited observations remain separately reviewable.');
+      });
+      button.dataset.candidateDecision = decision;
+      button.setAttribute('aria-pressed', String(candidate.status === decision));
+    }
+    card.append(decisions);
     candidates.append(card);
   }
   if (!workspace.candidates?.length) candidates.append(node('p', 'No candidate identities derived yet.', 'small muted'));
@@ -767,15 +831,26 @@ function renderResearch(workspace, caseId) {
     const card = node('article', undefined, 'tool-step claim-card');
     const candidate = workspace.candidates?.find(item => item.id === claim.candidate_id);
     card.append(node('p', [candidate?.label || claim.candidate_id, claim.status || 'unverified'].filter(Boolean).join(' · '), 'eyebrow'), node('h4', [claim.predicate, typeof claim.value === 'string' ? claim.value : JSON.stringify(claim.value)].filter(Boolean).join(': ')));
+    if (candidate?.status === 'different') card.append(node('p', 'Marked as a different target. This observation is retained for comparison, not attributed to the subject.', 'step-error'));
     if (claim.quote) card.append(node('blockquote', claim.quote, 'source-quote'));
     for (const reference of claim.references || claim.refs || []) {
-      card.append(node('blockquote', reference.quote || '', 'source-quote'), node('p', [reference.relation || 'support', reference.extractor_version || '', reference.extraction_id ? 'Extraction ' + reference.extraction_id : '', Number.isInteger(reference.start) ? `characters ${reference.start}–${reference.end}` : ''].filter(Boolean).join(' · '), 'small muted'));
+      card.append(node('blockquote', reference.quote || '', 'source-quote'), node('p', [reference.relation || 'support', pageReferenceLabel(reference.pages), reference.extractor_version || '', reference.extraction_id ? 'Extraction ' + reference.extraction_id : '', Number.isInteger(reference.start) ? `characters ${reference.start}–${reference.end}` : ''].filter(Boolean).join(' · '), 'small muted'));
       sourceLink(card, caseId, reference.evidence_id, 'Inspect cited evidence');
     }
     if (claim.extraction_version || claim.start !== undefined) card.append(node('p', ['Extraction ' + (claim.extraction_version || 'saved'), claim.start !== undefined ? `characters ${claim.start}–${claim.end}` : ''].filter(Boolean).join(' · '), 'small muted'));
     sourceLink(card, caseId, claim.evidence_id || claim.source_id, 'Inspect supporting passage'); claims.append(card);
   }
   if (!workspace.claims?.length) claims.append(node('p', 'No sourced observations yet. Search snippets remain discovery leads.', 'small muted'));
+  const questions = $('research-question-list'); questions.replaceChildren();
+  for (const question of workspace.questions || []) {
+    const card = node('article', undefined, 'question-card');
+    card.append(node('p', question.status || 'unresolved', 'eyebrow'), node('h4', question.text || question.question || 'Investigation question'));
+    if (question.answer) card.append(node('p', typeof question.answer === 'string' ? question.answer : JSON.stringify(question.answer), 'small'));
+    if (question.gap) card.append(node('p', typeof question.gap === 'string' ? question.gap : JSON.stringify(question.gap), 'small muted'));
+    for (const id of question.evidence_ids || []) sourceLink(card, caseId, id, 'Question evidence');
+    questions.append(card);
+  }
+  if (!workspace.questions?.length) questions.append(node('p', 'Add a public objective above or investigate the subject to see evidence questions and remaining gaps.', 'small muted'));
   relationshipWorkspace = {workspace, caseId};
   const candidateFilter = $('relationship-candidate'), previousFilter = candidateFilter.value;
   const allCandidates = node('option', 'All candidates'); allCandidates.value = ''; candidateFilter.replaceChildren(allCandidates);
@@ -784,6 +859,7 @@ function renderResearch(workspace, caseId) {
   }
   candidateFilter.value = (workspace.candidates || []).some(candidate => candidate.id === previousFilter) ? previousFilter : '';
   renderRelationships(workspace, caseId);
+  renderEvidenceAtlas(workspace, caseId);
 }
 function renderRelationships(workspace, caseId) {
   const selected = $('relationship-candidate').value;
@@ -802,6 +878,7 @@ function renderRelationships(workspace, caseId) {
       const row = node('tr'), candidate = workspace.candidates?.find(item => item.id === claim.candidate_id);
       row.append(node('td', candidate?.label || 'Unassigned candidate'), node('td', [claim.predicate, claim.value, '(' + (claim.status || 'unconfirmed') + ')'].filter(Boolean).join(' · ')), node('td', reference.relation === 'contradict' ? 'Contradicts observation' : 'Supports observation'));
       const evidence = node('td');
+      if (reference.pages?.length) evidence.append(node('p', pageReferenceLabel(reference.pages), 'small'));
       if (reference.quote) evidence.append(node('blockquote', reference.quote, 'source-quote'));
       if (reference.evidence_id) researchAction(evidence, 'Inspect original evidence', () => showEvidence(caseId, reference.evidence_id));
       row.append(evidence); body.append(row);
@@ -928,3 +1005,157 @@ action($('connector-form'), async () => {
   await api('/api/action', {case: caseId, connector: selectedConnector.id, arguments: args});
   $('connector-dialog').close(); await refreshResearch(caseId); await refreshRun(caseId); notice('Source action queued. Its inputs, attempts and evidence are saved.');
 }, 'submit');
+
+// Evidence Atlas is a provenance view. Layout never creates relationships.
+let atlasState = null, atlasRenderSignature = '', atlasSelected = 'focus';
+function atlasGraph(workspace, subject, evidence = []) {
+  const nodes = [{id: 'focus', kind: 'focus', label: subject || 'Investigation', status: 'research focus'}], edges = [], sourceNodes = new Map(), edgeKeys = new Set();
+  const originals = new Map(evidence.map(item => [item.id, item]));
+  const origins = new Map((workspace.origins || []).map(origin => [origin.evidence_id, origin]));
+  const source = id => {
+    if (!id) return;
+    if (!sourceNodes.has(id)) {
+      const item = originals.get(id) || {}, origin = origins.get(id) || {kind: 'unknown', established: false};
+      let label = item.title;
+      if (!label || /^https:\/\//.test(label)) {
+        try { const url = new URL(item.source); label = (url.pathname.split('/').filter(Boolean).pop() || url.hostname) + ' · ' + url.hostname; } catch (_) { /* Retain a saved title when its source is not a URL. */ }
+      }
+      sourceNodes.set(id, {id: 'source:' + id, kind: 'source', sourceId: id, label: label || 'Saved source ' + String(sourceNodes.size + 1).padStart(2, '0'), source: item.source || '', status: origin.kind || 'unknown', origin});
+    }
+    return 'source:' + id;
+  };
+  const edge = (from, id, relation, quote = '') => {
+    const to = source(id), key = [from, to, relation].join('|');
+    if (!to || edgeKeys.has(key)) return;
+    edgeKeys.add(key); edges.push({from, to, relation, quote});
+  };
+  for (const candidate of workspace.candidates || []) {
+    const id = 'candidate:' + candidate.id;
+    nodes.push({id, kind: 'candidate', label: candidate.label || candidate.id, status: candidate.status || 'unconfirmed', candidate});
+    for (const evidenceId of new Set([candidate.source_id, ...(candidate.evidence_ids || [])].filter(Boolean))) edge(id, evidenceId, 'candidate source');
+    for (const claim of (workspace.claims || []).filter(item => item.candidate_id === candidate.id)) {
+      for (const reference of claim.references || claim.refs || []) edge(id, reference.evidence_id, reference.relation === 'contradict' ? 'contradicting passage' : 'cited passage', reference.quote || '');
+    }
+  }
+  for (const claim of workspace.claims || []) for (const reference of claim.references || claim.refs || []) source(reference.evidence_id);
+  for (const question of workspace.questions || []) {
+    const id = 'question:' + question.id;
+    nodes.push({id, kind: 'question', label: question.text || question.question || 'Research question', status: question.status || 'unresolved', question});
+    for (const reference of question.refs || question.references || []) if (reference && typeof reference === 'object') edge(id, reference.evidence_id, reference.relation === 'contradict' ? 'contradicting passage' : 'question source', reference.quote || '');
+    for (const evidenceId of question.evidence_ids || []) edge(id, evidenceId, 'question source');
+  }
+  for (const origin of workspace.origins || []) if (origin.source_id && sourceNodes.has(origin.evidence_id)) edge(source(origin.evidence_id), origin.source_id, 'recorded source lineage');
+  if (!sourceNodes.size) for (const origin of (workspace.origins || []).slice(0, 8)) source(origin.evidence_id);
+  nodes.push(...sourceNodes.values());
+  const selected = [nodes[0], ...nodes.filter(item => item.kind === 'candidate').slice(0, 8), ...nodes.filter(item => item.kind === 'source').slice(0, 12), ...nodes.filter(item => item.kind === 'question').slice(0, 6)];
+  const ids = new Set(selected.map(item => item.id));
+  return {nodes: selected, edges: edges.filter(item => ids.has(item.from) && ids.has(item.to)), totalNodes: nodes.length, totalEdges: edges.length};
+}
+function atlasSVG(tag, attributes = {}, text) {
+  const element = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const [key, value] of Object.entries(attributes)) element.setAttribute(key, String(value));
+  if (text !== undefined) element.textContent = text;
+  return element;
+}
+function renderEvidenceAtlas(workspace, caseId) {
+  const area = $('evidence-atlas');
+  if (!area || currentCase !== caseId) return;
+  const previousCase = atlasState?.caseId;
+  atlasState = previousCase === caseId ? {...atlasState, workspace} : {workspace, caseId};
+  const report = displayedRun?.case_id === caseId ? displayedRun : null;
+  const hasData = (workspace.candidates?.length || workspace.claims?.length || workspace.questions?.length || workspace.origins?.length);
+  area.hidden = !report || report.status === 'running' || !hasData;
+  if (area.hidden) { atlasRenderSignature = ''; return; }
+  const evidence = [...(report.pages || []).map(page => ({id: page.source_id, title: page.title, source: page.final_url || page.url})), ...(atlasEvidence.caseId === caseId ? atlasEvidence.items : [])];
+  const graph = atlasGraph(workspace, currentSubject || report.subject, evidence);
+  const signature = JSON.stringify([caseId, report.status, graph]);
+  if (signature === atlasRenderSignature) return;
+  atlasRenderSignature = signature;
+  if (previousCase !== caseId || !graph.nodes.some(item => item.id === atlasSelected)) atlasSelected = 'focus';
+  $('atlas-run-state').textContent = report.status === 'complete' ? 'RESEARCH CHECKPOINT / COMPLETE' : 'RESEARCH CHECKPOINT / ' + String(report.status).toUpperCase();
+  $('atlas-scope').textContent = `${graph.nodes.filter(item => item.kind === 'source').length} saved sources · ${graph.nodes.filter(item => item.kind === 'candidate').length} possible matches · ${graph.nodes.filter(item => item.kind === 'question' && item.status !== 'supported').length} questions without settled support` + (graph.nodes.length < graph.totalNodes ? ` · Showing ${graph.nodes.length} of ${graph.totalNodes} points; complete references remain in the relationship table and export.` : '');
+  const canvas = $('atlas-canvas'); canvas.replaceChildren();
+  const svg = atlasSVG('svg', {viewBox: '0 0 1000 660', role: 'group', 'aria-label': 'Interactive evidence atlas. Select a point to inspect its recorded sources and uncertainty.'});
+  svg.append(atlasSVG('title', {}, 'Evidence Atlas · source-linked research'), atlasSVG('desc', {}, 'Candidates, sources and questions connected only by saved citations and provenance. The central subject is an unconnected research anchor.'));
+  const guides = atlasSVG('g', {'aria-hidden': 'true', class: 'atlas-guides'});
+  for (const radius of [125, 215, 300]) guides.append(atlasSVG('circle', {cx: 475, cy: 315, r: radius}));
+  for (const x of [175, 325, 475, 625, 775]) guides.append(atlasSVG('path', {d: `M ${x} 40 V 610`}));
+  for (const y of [115, 215, 315, 415, 515]) guides.append(atlasSVG('path', {d: `M 70 ${y} H 930`}));
+  guides.append(atlasSVG('text', {x: 42, y: 35}, 'PLATE / 01'), atlasSVG('text', {x: 760, y: 635}, 'PROVENANCE, NOT PROXIMITY'));
+  svg.append(guides);
+  const positions = new Map([['focus', {x: 475, y: 315}]]);
+  const arrange = (kind, radius, start, span) => {
+    const items = graph.nodes.filter(item => item.kind === kind);
+    items.forEach((item, index) => { const angle = (start + (items.length === 1 ? span / 2 : index * span / (items.length - 1))) * Math.PI / 180; positions.set(item.id, {x: 475 + radius * Math.cos(angle), y: 315 + radius * Math.sin(angle)}); });
+  };
+  arrange('candidate', 225, 130, 95); arrange('source', 300, -65, 130); arrange('question', 165, 200, 140);
+  const paths = [];
+  for (const link of graph.edges) {
+    const from = positions.get(link.from), to = positions.get(link.to);
+    const path = atlasSVG('path', {d: `M ${from.x} ${from.y} Q 475 ${link.relation === 'contradicting passage' ? 430 : 235} ${to.x} ${to.y}`, class: 'atlas-edge' + (link.relation === 'contradicting passage' ? ' atlas-edge-contradiction' : '')});
+    path.append(atlasSVG('title', {}, link.relation)); path.dataset.atlasFrom = link.from; path.dataset.atlasTo = link.to;
+    svg.append(path); paths.push({element: path, link});
+  }
+  const nodeElements = [];
+  for (const item of graph.nodes) {
+    const point = positions.get(item.id), uncertain = item.kind === 'candidate' && !['same', 'different'].includes(item.status);
+    const group = atlasSVG('g', {transform: `translate(${point.x} ${point.y})`, role: 'button', tabindex: 0, 'aria-label': `${item.kind}: ${item.label}. ${item.status}. Select to inspect.`, class: `atlas-point atlas-${item.kind}${uncertain ? ' atlas-uncertain' : ''}${item.kind === 'candidate' && item.status === 'different' ? ' atlas-different' : ''}${item.kind === 'source' && !item.origin.established ? ' atlas-origin-unknown' : ''}`});
+    group.dataset.atlasNode = item.id;
+    group.append(atlasSVG('circle', {r: item.kind === 'focus' ? 62 : 24, class: 'atlas-hit'}));
+    if (item.kind === 'focus') group.append(atlasSVG('path', {d: 'M 0 -50 L 50 0 L 0 50 L -50 0 Z', class: 'atlas-focus-mark'}));
+    else if (item.kind === 'question') group.append(atlasSVG('path', {d: 'M 0 -11 L 11 0 L 0 11 L -11 0 Z', class: item.status === 'supported' ? 'atlas-mark atlas-supported' : 'atlas-mark'}));
+    else if (item.kind === 'source') group.append(atlasSVG('rect', {x: -8, y: -10, width: 16, height: 20, rx: 1, class: 'atlas-mark'}));
+    else group.append(atlasSVG('circle', {r: 11, class: 'atlas-mark'}));
+    const maxLabel = item.kind === 'question' ? 20 : item.kind === 'source' ? 22 : 28, label = item.label.length > maxLabel ? item.label.slice(0, maxLabel - 2) + '…' : item.label;
+    const labelX = item.kind === 'source' ? 20 : item.kind === 'candidate' ? -20 : 0;
+    const questionIndex = graph.nodes.filter(value => value.kind === 'question').indexOf(item);
+    const labelY = item.kind === 'focus' ? 76 : item.kind === 'question' ? questionIndex % 2 ? -28 : 35 : 0;
+    const anchor = item.kind === 'source' ? 'start' : item.kind === 'candidate' ? 'end' : 'middle';
+    group.append(atlasSVG('text', {x: labelX, y: labelY, 'text-anchor': anchor, class: 'atlas-point-label'}, label));
+    group.append(atlasSVG('text', {x: labelX, y: labelY + 14, 'text-anchor': anchor, class: 'atlas-point-meta'}, item.kind === 'source' ? 'origin ' + item.status : item.kind === 'focus' ? 'RESEARCH FOCUS' : item.status));
+    const activate = () => inspectAtlasPoint(item.id);
+    group.addEventListener('click', activate);
+    group.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); activate(); } });
+    svg.append(group); nodeElements.push({element: group, item, baseClass: group.getAttribute('class')});
+  }
+  canvas.append(svg);
+  const picker = $('atlas-node-picker'); picker.replaceChildren();
+  for (const item of graph.nodes) { const option = node('option', item.kind.toUpperCase() + ' · ' + item.label); option.value = item.id; picker.append(option); }
+  atlasState = {workspace, caseId, graph, nodeElements, paths};
+  inspectAtlasPoint(atlasSelected);
+}
+function inspectAtlasPoint(id) {
+  const state = atlasState;
+  if (!state?.graph || state.caseId !== currentCase) return;
+  const item = state.graph.nodes.find(value => value.id === id); if (!item) return;
+  atlasSelected = id; $('atlas-node-picker').value = id;
+  const connected = new Set([id]);
+  for (const {link} of state.paths) if (link.from === id || link.to === id) { connected.add(link.from); connected.add(link.to); }
+  for (const {element, item: point, baseClass} of state.nodeElements) { element.setAttribute('class', baseClass + (point.id === id ? ' atlas-selected' : '') + (id !== 'focus' && !connected.has(point.id) ? ' atlas-dimmed' : '')); element.setAttribute('aria-pressed', String(point.id === id)); }
+  for (const {element, link} of state.paths) element.setAttribute('class', 'atlas-edge' + (link.relation === 'contradicting passage' ? ' atlas-edge-contradiction' : '') + (id === 'focus' || link.from === id || link.to === id ? ' atlas-edge-active' : ' atlas-dimmed'));
+  const detail = $('atlas-detail'); detail.replaceChildren(node('p', item.kind.toUpperCase(), 'eyebrow'), node('h4', item.label), node('p', item.status, 'atlas-detail-status'));
+  if (item.kind === 'source') {
+    if (item.source) detail.append(node('p', item.source, 'detail-meta'));
+    detail.append(node('p', item.origin.established ? 'Recorded origin lineage is established; this alone does not verify content or attribution.' : 'Origin is not established. This source is not independent corroboration.', 'small'));
+    if (item.origin.reason) detail.append(node('p', item.origin.reason, 'small muted'));
+    researchAction(detail, 'Open saved evidence', () => { if (state.caseId === currentCase) return showEvidence(state.caseId, item.sourceId); });
+  } else if (item.kind === 'candidate') {
+    if (item.candidate.context) detail.append(node('p', String(item.candidate.context), 'small'));
+    detail.append(node('p', 'A possible match is not a confirmed identity. Review the original sources before recording a reversible match decision.', 'small'));
+    researchAction(detail, 'Review match decisions', () => { if (state.caseId === currentCase) $('possible-matches').scrollIntoView({block: 'start'}); });
+  } else if (item.kind === 'question') {
+    const question = item.question;
+    const gaps = question.gap || (question.gaps || []).join(' ');
+    if (gaps) detail.append(node('p', gaps, 'small'));
+    for (const ref of question.refs || question.references || []) if (ref?.quote) detail.append(node('blockquote', ref.quote, 'source-quote'));
+    const ids = new Set([...(question.evidence_ids || []), ...(question.refs || question.references || []).map(ref => ref?.evidence_id)].filter(Boolean));
+    for (const evidenceId of ids) researchAction(detail, 'Read question evidence', () => { if (state.caseId === currentCase) return showEvidence(state.caseId, evidenceId); });
+  } else detail.append(node('p', 'The center names this case, not an established identity. Select a point to trace its actual saved evidence. Dashed candidates and unknown origins retain their uncertainty.', 'small'));
+  const links = state.graph.edges.filter(link => link.from === id || link.to === id);
+  if (links.length) {
+    const list = node('ul', undefined, 'atlas-link-list');
+    for (const link of links) { const other = state.graph.nodes.find(point => point.id === (link.from === id ? link.to : link.from)); list.append(node('li', link.relation + ' · ' + (other?.label || 'Saved source'))); }
+    detail.append(list);
+  }
+}
+action($('atlas-node-picker'), () => inspectAtlasPoint($('atlas-node-picker').value), 'change');

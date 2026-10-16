@@ -16,6 +16,10 @@ from .engine import InvalidInput, MAX_BYTES
 
 
 SEARCH_PROVIDERS = {"duckduckgo": "DuckDuckGo", "bing": "Bing"}
+ACCEPT_PROFILES = {
+    "default": "text/html, text/plain, application/json, application/jrd+json, application/activity+json, application/pdf, application/xml, text/csv",
+    "activitypub": 'application/activity+json, application/ld+json; profile="https://www.w3.org/ns/activitystreams", application/json;q=0.9',
+}
 
 
 def public_address(value):
@@ -114,17 +118,19 @@ def fetch_public(url, allow_query=False):
     return _fetch_public(url, allow_query)
 
 
-def fetch_public_response(url, allow_query=False, allowed_hosts=None):
+def fetch_public_response(url, allow_query=False, allowed_hosts=None, accept="default"):
     """Collect bounded response bytes and HTTP outcome for trusted connectors.
 
     Unlike ordinary page collection, failure bodies are evidence too. DNS,
     destination pinning, redirect checks and body limits remain identical.
     """
-    return _fetch_public(url, allow_query, structured=True, allowed_hosts=allowed_hosts)
+    return _fetch_public(url, allow_query, structured=True, allowed_hosts=allowed_hosts, accept=accept)
 
 
-def _fetch_public(url, allow_query=False, structured=False, allowed_hosts=None):
+def _fetch_public(url, allow_query=False, structured=False, allowed_hosts=None, accept="default"):
     """Fetch a bounded public response, revalidating and pinning every redirect."""
+    if accept not in ACCEPT_PROFILES:
+        raise InvalidInput("Choose a built-in response content profile.")
     deadline = time.monotonic() + 20
     visited = set()
     current = url
@@ -140,7 +146,7 @@ def _fetch_public(url, allow_query=False, structured=False, allowed_hosts=None):
         connection = PinnedHTTPS(host, address)
         connection.timeout = min(10, max(0.001, deadline - time.monotonic()))
         try:
-            connection.request("GET", path, headers={"User-Agent": "LocalOSINT/0.1 (public evidence collection)", "Accept": "text/html, text/plain, application/json, text/csv", "Accept-Encoding": "identity"})
+            connection.request("GET", path, headers={"User-Agent": "LocalOSINT/0.1 (public evidence collection)", "Accept": ACCEPT_PROFILES[accept], "Accept-Encoding": "identity"})
             response = connection.getresponse()
             if response.status in {301, 302, 303, 307, 308}:
                 location = response.getheader("Location")
@@ -178,12 +184,15 @@ def read_public_response(response, connection, canonical, deadline, permit_statu
         decoder = zlib.decompressobj(16 + zlib.MAX_WBITS if encoding == "gzip" else zlib.MAX_WBITS) if encoding != "identity" else None
         mime = response.getheader("Content-Type", "").split(";", 1)[0].strip().lower()
         formats = {"text/html": "html", "text/plain": "text", "application/json": "json", "application/rdap+json": "json", "text/csv": "csv"}
+        formats.update({"application/jrd+json": "json", "application/activity+json": "json", "application/ld+json": "json",
+                        "application/pdf": "pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+                        "application/vnd.oasis.opendocument.text": "odt", "image/png": "png", "image/jpeg": "jpeg", "image/tiff": "tiff"})
         if permit_xml:
-            formats.update({"application/xml": "text", "text/xml": "text", "application/rss+xml": "text", "application/atom+xml": "text"})
+            formats.update({"application/xml": "text", "text/xml": "text", "application/rss+xml": "text", "application/atom+xml": "text", "application/x-ndjson": "text", "application/jsonl": "text"})
         if permit_status and not mime:
             formats[""] = "text"
         if mime not in formats:
-            raise InvalidInput("Only UTF-8 HTML, text, JSON and CSV responses are supported.")
+            raise InvalidInput("Source returned an unsupported evidence format. Supported types include text, HTML, JSON, CSV, PDF, DOCX, ODT and OCR images.")
         length = response.getheader("Content-Length")
         if length and (not length.isdecimal() or int(length) > MAX_BYTES):
             raise InvalidInput("Response exceeds the 2 MiB evidence limit.")

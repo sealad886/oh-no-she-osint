@@ -29,9 +29,9 @@ class WorkspaceTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def test_new_database_uses_schema2_without_spurious_backup(self):
+    def test_new_database_uses_schema3_without_spurious_backup(self):
         with self.engine.connection() as db:
-            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 3)
         self.assertFalse((self.directory / "backups").exists())
 
     def test_arguments_preserve_phrases_operators_pagination_and_candidate_scope(self):
@@ -175,7 +175,7 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(snapshot["settings"]["connectors"], ["crossref"])
         self.assertEqual(snapshot["health"][0]["state"], "blocked")
         exported = self.engine.export(self.case)
-        self.assertEqual(exported["schema_version"], 2)
+        self.assertEqual(exported["schema_version"], 3)
         self.assertIn("workspace", exported)
         self.assertEqual(exported["evidence"][0]["id"], self.source)
 

@@ -323,6 +323,23 @@ class Handler(BaseHTTPRequestHandler):
                     self.reply(202, self.server.jobs.start(data.get('case'), action={'tool': data['connector'], 'arguments': args}))
                 elif path == '/api/resume':
                     self.reply(202, self.server.jobs.start(data.get('case'), action={'tool': 'resume_queue', 'arguments': {}}))
+                elif path == '/api/candidate/decision':
+                    case = data.get('case')
+                    decision = self.server.workspace.decide_candidate(case, data.get('candidate'), data.get('status'), reason=data.get('reason', ''))
+                    snapshot = self.server.workspace.snapshot(case)
+                    same = any(item['status'] == 'same' for item in snapshot['candidates'])
+                    excluded = {item['source_id'] for item in snapshot['candidates'] if item['status'] == 'different' and item.get('source_id')}
+                    for question in snapshot['questions']:
+                        if question['key'] == 'identity':
+                            self.server.workspace.update_question(case, question['id'], status='supported' if same else 'unresolved',
+                                gap='An operator match decision is recorded; individual claims still require evidence.' if same else 'Possible matches remain uncertain; compare the original passages.')
+                        elif question['key'] == 'objective' and excluded.intersection(question['evidence_ids']):
+                            self.server.workspace.update_question(case, question['id'], status='unresolved', gap='A cited candidate was marked different. Continue investigation to reassess this answer; earlier passages remain saved.')
+                    self.reply(200, decision)
+                elif path == '/api/document/reextract':
+                    if self.server.jobs.active:
+                        raise InvalidInput('Stop collection before retrying document extraction.')
+                    self.reply(200, engine.reextract(data.get('case'), data.get('id'), data.get('document_options')))
                 elif path == '/api/task':
                     if self.server.jobs.active:
                         raise InvalidInput('Pause the investigation before editing queued work.')
@@ -348,9 +365,15 @@ class Handler(BaseHTTPRequestHandler):
                 elif path == '/api/search-service/stop':
                     self.reply(200, self.server.search_service.stop())
                 elif path == "/api/investigate":
-                    self.reply(202, self.server.jobs.start(data.get('case'), data.get('ai', False), data.get('options')))
+                    options = data.get('options')
+                    if options is not None and not isinstance(options, dict):
+                        raise InvalidInput('Investigation settings must be an object.')
+                    self.reply(202, self.server.jobs.start(data.get('case'), data.get('ai', True), {**(options or {}), 'automatic': True}))
                 elif path == "/api/continue":
-                    self.reply(202, self.server.jobs.start(data.get('case'), options=data.get('options'), continuing=True))
+                    options = data.get('options')
+                    if options is not None and not isinstance(options, dict):
+                        raise InvalidInput('Investigation settings must be an object.')
+                    self.reply(202, self.server.jobs.start(data.get('case'), data.get('ai', True), options={**(options or {}), 'automatic': True}, continuing=True))
                 elif path == '/api/tool':
                     self.reply(202, self.server.jobs.start(data.get('case'), data.get('ai', False),
                         action={'tool': data.get('tool'), 'arguments': data.get('arguments', {})}))
@@ -368,7 +391,7 @@ class Handler(BaseHTTPRequestHandler):
                         raw = base64.b64decode(value, validate=True)
                     except (ValueError, binascii.Error) as exc:
                         raise InvalidInput("Invalid evidence encoding.") from exc
-                    self.reply(201, engine.ingest(data.get("case"), raw, data.get("title"), data.get("source", "Imported file"), data.get("format", "text")))
+                    self.reply(201, engine.ingest(data.get("case"), raw, data.get("title"), data.get("source", "Imported file"), data.get("format", "text"), document_options=data.get('document_options')))
                 elif path == "/api/discover":
                     self.reply(200, discover(engine, data.get("case"), data.get("sources"), self.server.allow_network, data.get("query")))
                 elif path == "/api/research":

@@ -56,6 +56,9 @@ def _meta(id, label, inputs, domains, description, **extra):
 
 
 REGISTRY = {
+    "webfinger": _meta("webfinger", "Public federated account lookup", ["account"], ["approved account domain"], "Resolve one approved public user@domain address. No cross-instance username scanning."),
+    "public_actor": _meta("public_actor", "Public ActivityPub profile", ["url"], ["approved profile host"], "Read one public actor/profile document. Linked contexts and inboxes are never fetched."),
+    "commoncrawl": _meta("commoncrawl", "Common Crawl URL discovery", ["url"], ["index.commoncrawl.org"], "Find historical URLs for an approved public URL prefix. Index records are discovery leads, not retrieved page evidence.", max_requests=2, max_redirect_requests=6),
     "crossref": _meta("crossref", "Crossref publications", ["query"], ["api.crossref.org"], "Public publication metadata; enable when research is relevant."),
     "github_public": _meta("github_public", "GitHub public profile", ["username"], ["api.github.com"], "One approved public username. Account existence does not establish target identity."),
     "public_profile": _meta("public_profile", "Public username profile", ["username", "site"], ["github.com", "gitlab.com"], "One selected public site per action; no account recovery or automatic ownership inference.", provenance=PROFILE_PROVENANCE, sites=list(PROFILE_SITES)),
@@ -94,6 +97,15 @@ def validate_arguments(connector_id, arguments):
         out[key] = value.strip()
     if "url" in out:
         out["url"] = public_url(out["url"], allow_query=True)[2]
+    if "account" in out:
+        account = out["account"].lstrip("@")
+        if account.count("@") != 1:
+            raise InvalidInput("Use an approved public federated address in user@domain form.")
+        username, host = account.split("@")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", username) or not re.fullmatch(r"[A-Za-z0-9.-]+", host):
+            raise InvalidInput("Public federated username contains unsupported characters.")
+        host = public_url("https://" + host + "/")[0]
+        out["account"] = username + "@" + host
     if "username" in out and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,38}", out["username"]):
         raise InvalidInput("Use an approved public username with letters, numbers, underscores or hyphens, up to 39 characters.")
     if "site" in out and out["site"] not in PROFILE_SITES:
@@ -109,6 +121,16 @@ def _lead(url, title="", snippet="", **extra):
     except (InvalidInput, TypeError):
         return None
     return {"url": canonical, "title": str(title)[:300], "snippet": str(snippet)[:1000], **extra}
+
+
+def _save_response(engine, case_id, connector_id, response):
+    raw, format, canonical = response["raw"], response["format"], response["canonical"]
+    if format == "json":
+        try:
+            json.loads(raw)
+        except (ValueError, UnicodeError):
+            format = "text"
+    return engine.ingest(case_id, raw, generated_title(REGISTRY[connector_id]["label"] + ": " + canonical), canonical, format)
 
 
 class SourceLinks(HTMLParser):
@@ -175,7 +197,7 @@ class SourceLinks(HTMLParser):
         self._finish_anchor()
 
 
-def _website(raw, format, canonical):
+def _website(raw, format, canonical, context=""):
     text = raw.decode("utf-8")
     host = urlsplit(canonical).hostname
     links, observations = [], []
@@ -210,6 +232,19 @@ def _website(raw, format, canonical):
         if item and urlsplit(item["url"]).hostname == host and item["url"] not in seen and item["url"] != canonical:
             seen.add(item["url"])
             leads.append(item)
+    # Rank locally: target-bearing pages, documents and feeds should surface
+    # before generic navigation. No extra request or context disclosure occurs.
+    terms = {term.lower() for term in re.findall(r"\w{3,}", context)[:30]}
+    def rank(item):
+        value = (item["url"] + " " + item["title"] + " " + item["snippet"]).lower()
+        tokens = set(re.findall(r"\w{3,}", value))
+        score = len(terms & tokens) * 8
+        score += 4 if re.search(r"\.(?:pdf|docx|odt)$", urlsplit(item["url"]).path, re.I) else 0
+        score += 3 if any(term in value for term in ("rss", "atom", "sitemap", "feed.xml")) else 0
+        score += len(tokens & {"staff", "team", "people", "publications", "reports", "bulletin", "directory", "members", "news"}) * 2
+        score -= len(tokens & {"login", "signin", "privacy", "cookies", "terms"}) * 4
+        return score
+    leads.sort(key=rank, reverse=True)
     return leads[:40], observations
 
 
@@ -217,7 +252,7 @@ def execute(engine, case_id, connector_id, arguments, enabled=False, settings=No
     """Run one trusted action. Caller additionally enforces case disclosure scope."""
     args = validate_arguments(connector_id, arguments)
     with engine.connection() as db:
-        engine.require_case(db, case_id)
+        case = engine.require_case(db, case_id)
     result = {"status": "empty", "evidence_ids": [], "leads": [], "observations": [], "summary": "No usable observations returned.", "requests": 0, "bytes": 0, "connector": connector_id}
     settings = settings or {}
     if connector_id == "email_headers":
@@ -257,6 +292,30 @@ def execute(engine, case_id, connector_id, arguments, enabled=False, settings=No
         return result
     if connector_id == "crossref":
         url = "https://api.crossref.org/works?" + urlencode({"query": args["query"], "rows": 10})
+    elif connector_id == "webfinger":
+        url = "https://" + args["account"].split("@")[1] + "/.well-known/webfinger?" + urlencode({"resource": "acct:" + args["account"]})
+    elif connector_id == "commoncrawl":
+        index = settings.get("commoncrawl_index")
+        if index is None:
+            catalogue_url = "https://index.commoncrawl.org/collinfo.json"
+            try:
+                response = fetch_public_response(catalogue_url, allow_query=True, allowed_hosts={"index.commoncrawl.org"})
+                saved = _save_response(engine, case_id, connector_id, response)
+                result.update(evidence_ids=[saved["id"]], requests=response.get("requests", 1), bytes=len(response["raw"]))
+                if response["status"] != 200:
+                    result.update(status="rate_limited" if response["status"] == 429 else "blocked", summary="Common Crawl index catalogue unavailable; response retained.", retry_after=response.get("retry_after"))
+                    return result
+                entries = json.loads(response["raw"])
+                if not isinstance(entries, list):
+                    raise ValueError()
+                index = next((entry["id"] for entry in entries[:100] if isinstance(entry, dict) and re.fullmatch(r"CC-MAIN-\d{4}-\d{2}", str(entry.get("id", "")))), None)
+            except (InvalidInput, ValueError, TypeError, KeyError):
+                result.update(status="uninterpretable", summary="Common Crawl index catalogue could not be interpreted; no index query was sent.")
+                return result
+        if not isinstance(index, str) or not re.fullmatch(r"CC-MAIN-\d{4}-\d{2}", index):
+            raise InvalidInput("Choose a Common Crawl index ID such as CC-MAIN-2026-39.")
+        result["index"] = index
+        url = "https://index.commoncrawl.org/" + index + "-index?" + urlencode({"url": args["url"], "matchType": "prefix", "output": "json", "filter": "status:200", "collapse": "urlkey", "limit": 40})
     elif connector_id == "github_public":
         url = "https://api.github.com/users/" + quote(args["username"], safe="")
     elif connector_id == "public_profile":
@@ -267,29 +326,64 @@ def execute(engine, case_id, connector_id, arguments, enabled=False, settings=No
         url = "https://www.geonames.org/search.html?" + urlencode({"q": args["query"], "country": ""})
     else:
         url = args["url"]
-    result["requests"] = 1
+    result["requests"] += 1
     try:
-        response = fetch_public_response(url, allow_query=True, allowed_hosts={urlsplit(url).hostname})
+        options = {"allow_query": True, "allowed_hosts": {urlsplit(url).hostname}}
+        if connector_id == "public_actor":
+            options["accept"] = "activitypub"
+        response = fetch_public_response(url, **options)
     except InvalidInput as exc:
         result.update(status="error", summary=str(exc))
         return result
     raw, format, canonical = response["raw"], response["format"], response["canonical"]
-    if format == "json":
-        try:
-            json.loads(raw)
-        except (ValueError, UnicodeError):
-            # A malformed API response is still a retained UTF-8 source, not lost evidence.
-            format = "text"
-    saved = engine.ingest(case_id, raw, generated_title(REGISTRY[connector_id]["label"] + ": " + canonical), canonical, format)
+    saved = _save_response(engine, case_id, connector_id, response)
     evidence_id = saved["id"]
-    result.update(evidence_ids=[evidence_id], bytes=len(raw), requests=response.get("requests", 1), http_status=response["status"])
+    result.update(evidence_ids=result["evidence_ids"] + [evidence_id], bytes=result["bytes"] + len(raw), requests=result["requests"] + response.get("requests", 1) - 1, http_status=response["status"])
     status = response["status"]
     if status != 200:
         outcome = "rate_limited" if status == 429 else "empty" if status in {404, 410} else "blocked" if status in {401, 403, 999} else "error"
         result.update(status=outcome, summary=f"Source returned HTTP {status}; response retained.", retry_after=response.get("retry_after"))
         return result
     try:
-        if connector_id == "crossref":
+        if connector_id == "webfinger":
+            data = json.loads(raw)
+            if not isinstance(data, dict) or data.get("subject", "").lower() != ("acct:" + args["account"]).lower() or not isinstance(data.get("links"), list):
+                raise ValueError("Account subject mismatch")
+            for link in data["links"][:30]:
+                if not isinstance(link, dict) or link.get("rel") not in {"self", "http://webfinger.net/rel/profile-page"}:
+                    continue
+                actor = link.get("rel") == "self"
+                if actor and str(link.get("type", "")).split(";", 1)[0].strip().lower() not in {"application/activity+json", "application/ld+json"}:
+                    continue
+                lead = _lead(link.get("href"), args["account"], "Public account discovery; person or organization ownership remains unconfirmed.", connector="public_actor" if actor else "collect_page", account=args["account"], relation=link["rel"], content_type=link.get("type", ""))
+                if lead:
+                    result["leads"].append(lead)
+            result["leads"].sort(key=lambda item: item["connector"] != "public_actor")
+            result["observations"] = [{"kind": "public_federated_account", "value": data["subject"], "quote": data["subject"], "ownership": "unconfirmed"}]
+        elif connector_id == "public_actor":
+            data = json.loads(raw)
+            if not isinstance(data, dict) or data.get("type") not in {"Person", "Organization", "Group", "Service", "Application"} or not isinstance(data.get("preferredUsername"), str):
+                raise ValueError("Not a public actor")
+            actor = _lead(data.get("id"), data.get("name") or data["preferredUsername"])
+            if not actor or urlsplit(actor["url"]).hostname != urlsplit(canonical).hostname:
+                raise ValueError("Actor origin mismatch")
+            result["leads"] = [actor]
+            for key in ("preferredUsername", "name", "summary", "published"):
+                if isinstance(data.get(key), str) and data[key].strip():
+                    result["observations"].append({"kind": "actor_" + key, "value": data[key][:1000], "quote": data[key][:1000], "ownership": "unconfirmed"})
+            # @context, inbox, sharedInbox, followers and outbox are intentionally
+            # inert data: reading a profile does not authorize those actions.
+        elif connector_id == "commoncrawl":
+            for line in raw.decode("utf-8").splitlines()[:40]:
+                if not line.strip():
+                    continue
+                item = json.loads(line)
+                if not isinstance(item, dict):
+                    continue
+                lead = _lead(item.get("url"), "Historical public URL", "Common Crawl index capture: " + str(item.get("timestamp", "")), archive_index=True, capture_date=str(item.get("timestamp", "")), original_url=item.get("url"), index=result["index"])
+                if lead and urlsplit(lead["url"]).hostname == urlsplit(args["url"]).hostname and lead["url"].startswith(args["url"]):
+                    result["leads"].append(lead)
+        elif connector_id == "crossref":
             data = json.loads(raw)
             items = data.get("message", {}).get("items")
             if not isinstance(items, list):
@@ -347,7 +441,7 @@ def execute(engine, case_id, connector_id, arguments, enabled=False, settings=No
                 if lead and urlsplit(lead["url"]).hostname == "web.archive.org":
                     result["leads"].append(lead)
         else:
-            leads, observations = _website(raw, format, canonical)
+            leads, observations = _website(raw, format, canonical, " ".join([case["name"], *case["aliases"]]))
             if connector_id == "public_place":
                 leads = [lead for lead in leads if re.search(r"/\d{2,}/", urlsplit(lead["url"]).path)]
             result.update(leads=leads, observations=observations)

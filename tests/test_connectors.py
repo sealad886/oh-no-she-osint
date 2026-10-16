@@ -27,7 +27,7 @@ class ConnectorTests(unittest.TestCase):
 
     def test_registry_is_explicit_and_optional_service_is_unavailable(self):
         items = catalogue()
-        self.assertEqual(len(items), 8)
+        self.assertTrue({"crossref", "github_public", "webfinger", "public_actor", "commoncrawl"}.issubset({item["id"] for item in items}))
         self.assertFalse(next(x for x in items if x["id"] == "searxng")["available"])
         local = next(x for x in items if x["id"] == "email_headers")
         self.assertEqual(local["outbound_fields"], [])
@@ -133,6 +133,15 @@ class ConnectorTests(unittest.TestCase):
         self.assertLessEqual(len(leads["https://example.org/long"]["title"]), 300)
         self.assertEqual(leads["https://example.org/unclosed"]["title"], "Public contacts")
 
+    def test_website_prioritizes_target_documents_over_generic_navigation_locally(self):
+        case = self.engine.create_case('Example Association', 'organization')['id']
+        body = b'<a href="/privacy">Privacy policy</a><a href="/home">Home</a><a href="/public/example-association-report.pdf">Example Association annual report</a><a href="/staff">Staff directory</a>'
+        with patch('local_osint.connectors.fetch_public_response', return_value=self.response(body, 'html', url='https://example.org/')) as fetch:
+            result = execute(self.engine, case, 'website_sources', {'url': 'https://example.org/'}, True)
+        self.assertEqual(result['leads'][0]['url'], 'https://example.org/public/example-association-report.pdf')
+        self.assertEqual(result['leads'][-1]['url'], 'https://example.org/privacy')
+        self.assertEqual(fetch.call_count, 1)
+
     def test_xml_sitemap_and_entity_rejection(self):
         for raw, expected in ((b'<urlset><url><loc>https://example.org/public</loc></url></urlset>', "success"), (b'<!DOCTYPE x [<!ENTITY y "unsafe">]><x>&y;</x>', "uninterpretable")):
             result, _ = self.run_source("website_sources", {"url": "https://example.org/sitemap.xml"}, self.response(raw, "text", url="https://example.org/sitemap.xml"))
@@ -166,6 +175,63 @@ class ConnectorTests(unittest.TestCase):
         self.assertEqual(result["upstream_fanout"], 3)
         self.assertEqual(len(result["upstream_failures"]), 1)
         self.assertEqual(len(result["evidence_ids"]), 1)
+
+    def test_webfinger_checks_exact_subject_and_emits_actor_followup_without_fetching(self):
+        body = json.dumps({"subject": "acct:alice@example.org", "links": [{"rel": "http://webfinger.net/rel/profile-page", "type": "text/html", "href": "https://example.org/@alice"}, {"rel": "self", "type": "application/activity+json", "href": "https://example.org/users/alice"}, {"rel": "subscribe", "href": "https://example.org/action"}, {"rel": "self", "type": "text/javascript", "href": "https://example.org/misleading-self"}]}).encode()
+        result, fetch = self.run_source("webfinger", {"account": "alice@example.org"}, self.response(body, url="https://example.org/.well-known/webfinger"))
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["leads"][0]["connector"], "public_actor")
+        self.assertEqual(result["leads"][1]["connector"], "collect_page")
+        self.assertEqual(len(result["leads"]), 2)
+        self.assertEqual(result["observations"][0]["ownership"], "unconfirmed")
+        self.assertEqual(fetch.call_count, 1)
+        result, _ = self.run_source("webfinger", {"account": "different@example.org"}, self.response(body, url="https://example.org/.well-known/webfinger"))
+        self.assertEqual(result["status"], "uninterpretable")
+
+    def test_federated_account_rejects_private_domain_or_identifier_injection(self):
+        for value in ('alice@localhost', 'alice@127.0.0.1', 'alice@example.org/path', 'alice+private@example.org', 'alice@example.org?secret=yes'):
+            with self.subTest(value=value), self.assertRaises(InvalidInput):
+                validate_arguments('webfinger', {'account': value})
+
+    def test_actor_context_inboxes_and_followers_are_never_fetched(self):
+        body = json.dumps({"@context": "https://outside.example/context", "id": "https://example.org/users/alice", "type": "Person", "preferredUsername": "alice", "name": "Alice Public", "inbox": "https://example.org/private/inbox", "outbox": "https://example.org/outbox", "followers": "https://example.org/followers"}).encode()
+        result, fetch = self.run_source("public_actor", {"url": "https://example.org/users/alice"}, self.response(body, url="https://example.org/users/alice"))
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual({lead['url'] for lead in result['leads']}, {'https://example.org/users/alice'})
+        self.assertTrue(all(item['ownership'] == 'unconfirmed' for item in result['observations']))
+        self.assertEqual(fetch.call_args.kwargs.get('accept'), 'activitypub')
+
+    def test_actor_content_negotiation_uses_fixed_profile_and_rejects_header_injection(self):
+        from local_osint.collector import fetch_public_response
+        actor = b'{"id":"https://example.org/users/alice","type":"Person","preferredUsername":"alice"}'
+        response = Mock(status=200)
+        response.getheader.side_effect = lambda name, default=None: {'Content-Type': 'application/activity+json'}.get(name, default)
+        response.read1.side_effect = [actor, b'']
+        with patch('local_osint.collector.target', return_value=('example.org', '8.8.8.8', '/users/alice', 'https://example.org/users/alice')), patch('local_osint.collector.PinnedHTTPS') as factory:
+            factory.return_value.getresponse.return_value = response
+            result = execute(self.engine, self.case, 'public_actor', {'url': 'https://example.org/users/alice'}, True)
+            self.assertEqual(result['status'], 'success')
+            self.assertIn('application/activity+json', factory.return_value.request.call_args.kwargs['headers']['Accept'])
+        with patch('local_osint.collector.target') as target:
+            with self.assertRaises(InvalidInput):
+                fetch_public_response('https://example.org/', accept='application/json\r\nCookie: secret')
+            target.assert_not_called()
+
+    def test_commoncrawl_saves_catalogue_and_bounded_index_leads_without_fetching_records(self):
+        catalogue = self.response(b'[{"id":"CC-MAIN-2026-39","cdx-api":"https://evil.example/ignored"}]', url='https://index.commoncrawl.org/collinfo.json')
+        records = self.response(b'{"url":"https://example.org/public/bulletin.pdf","timestamp":"20260901000000","filename":"unsafe.warc.gz"}\n{"url":"https://other.example/private","timestamp":"20260901000000"}', 'text', url='https://index.commoncrawl.org/CC-MAIN-2026-39-index')
+        with patch('local_osint.connectors.fetch_public_response', side_effect=[catalogue, records]) as fetch:
+            result = execute(self.engine, self.case, 'commoncrawl', {'url': 'https://example.org/public/'}, True)
+        self.assertEqual(result['status'], 'success')
+        self.assertEqual(result['requests'], 2)
+        self.assertEqual(len(result['evidence_ids']), 2)
+        self.assertEqual(len(result['leads']), 1)
+        self.assertTrue(result['leads'][0]['archive_index'])
+        self.assertNotIn('archived', result['leads'][0])
+        self.assertEqual(fetch.call_count, 2)
+        self.assertTrue(fetch.call_args.args[0].startswith('https://index.commoncrawl.org/CC-MAIN-2026-39-index?'))
+        self.assertIn('limit=40', fetch.call_args.args[0])
 
 
 if __name__ == "__main__":

@@ -53,7 +53,7 @@ def parser():
             sub.add_argument("file", type=Path)
             sub.add_argument("--title")
             sub.add_argument("--source", help="Evidence source label; defaults to basename")
-            sub.add_argument("--format", choices=["text", "html", "json", "csv"], help="Override format inferred from extension")
+            sub.add_argument("--format", choices=["text", "html", "json", "csv", "pdf", "docx", "odt", "png", "jpeg", "tiff"], help="Override evidence format inferred from extension; documents are processed locally")
         elif name in {"search", "entity", "export", "fetch", "research", "discover", "investigate"}:
             sub.add_argument("case_id")
             if name == "search":
@@ -66,6 +66,8 @@ def parser():
                 sub.add_argument("--format", choices=["json", "markdown"], default="json")
             elif name == "investigate":
                 sub.add_argument("--allow-network", action="store_true", required=True)
+                sub.add_argument("--question", default="", help="Question to answer from public evidence")
+                sub.add_argument("--ai", action="store_true", help="Start the cached local model for planning and exact-passage extraction")
             elif name == "discover":
                 sub.add_argument("--query", help="Optional query, such as a known alias; defaults to subject name")
                 sub.add_argument("--sources", nargs="+", choices=["wikipedia", "wikidata"], default=["wikipedia", "wikidata"])
@@ -160,14 +162,21 @@ def main(argv=None):
         elif args.command == "import":
             with args.file.open("rb") as stream:
                 raw = stream.read(MAX_BYTES + 1)
-            format = args.format or {".html": "html", ".htm": "html", ".json": "json", ".csv": "csv", ".txt": "text", ".md": "text"}.get(args.file.suffix.lower(), "text")
+            format = args.format or {".html": "html", ".htm": "html", ".json": "json", ".csv": "csv", ".txt": "text", ".md": "text", ".pdf": "pdf", ".docx": "docx", ".odt": "odt", ".png": "png", ".jpg": "jpeg", ".jpeg": "jpeg", ".tif": "tiff", ".tiff": "tiff"}.get(args.file.suffix.lower(), "text")
             result = engine.ingest(args.case_id, raw, args.title or args.file.name, args.source or args.file.name, format)
         elif args.command == "search":
             result = engine.view(args.case_id, args.query, args.kind)
         elif args.command == "entity":
             result = engine.entity(args.case_id, args.entity_id)
         elif args.command == "investigate":
-            result = Investigation(engine, args.case_id, args.allow_network).run()
+            from .ai import LocalAI
+            ai = LocalAI(engine) if args.ai else None
+            try:
+                result = Investigation(engine, args.case_id, args.allow_network, ai=ai,
+                    options={'automatic': True, 'question': args.question}, previous=engine.latest_investigation(args.case_id)).run()
+            finally:
+                if ai:
+                    ai.stop()
             print(json.dumps(result, indent=2, ensure_ascii=True))
             return 0 if result["status"] in {"complete", "partial"} else 1
         elif args.command == "discover":

@@ -1,5 +1,48 @@
 # Validation evidence
 
+## Automatic question-driven investigations and Evidence Atlas — 2026-10-16
+
+Status: implemented and locally qualified. The primary Investigate/Continue
+actions select source recipes, recover saved work and use the available cached
+local model without a manual source-tool selection. The Evidence Atlas exposes
+saved source/candidate/question provenance and preserves unresolved outcomes.
+
+| Evidence layer | Observed result |
+| --- | --- |
+| Python behavioral, HTTP and native-process suite | **342 passed in 30.278 seconds**, no failures or skips; run outside the sandbox for loopback listeners, launcher and owned-process checks |
+| UI controller suite | **22 passed**, including automatic Investigate/Continue, AI opt-out, document import/retry, page references, reversible decisions, atlas provenance, keyboard activation, stale-case protection and saved-source titles |
+| Actual existing-workspace upgrade | Schema 2 → 3, integrity `ok`; byte-for-byte fingerprints of cases/evidence/entities/mentions unchanged: **3 / 513 / 4,678 / 35,832** rows. Every original evidence ID, raw SHA-256 and extracted text preserved. A consistent private schema-2 backup was created before migration; no collection ran during upgrade |
+| Native document tools | Installed Poppler 26.10.0 and Tesseract 5.5.3 extracted text PDF, scanned PDF and image fixtures locally. Office, page provenance, extraction retry, ZIP/XML/image bounds and original-row preservation passed |
+| Browser + nginx + cached REDCELL | A fictional ordinary-person case used one Investigate click, started the owned model, collected three substantive public-source fixtures, extracted a target passage **on PDF page 18, after more than 6,500 characters**, and saved exact page citations. The explicit objective received quoted support; identity and independent corroboration remained unresolved. Atlas source inspection, local extraction retry, match/reversal controls and reload were exercised; browser error log was empty |
+| Native source-backed AI planning | Two real model calls: an unsupported page proposal was rejected; the repetition strategy then produced one fresh validated Bing action with an exact public passage and the correct saved evidence ID. Zero private-canary argument echoes and zero outbound collection during this isolated qualification; owned model stopped afterward |
+| Live public search | DuckDuckGo and Bing each returned **10 leads** for a public organization query. These are discovery results, not validated identity evidence |
+| Live federated lookup | WebFinger succeeded with actor and HTML-profile links. Properly negotiated ActivityPub returned **HTTP 401 / blocked**; response original retained, no bypass. Positive actor parsing and fixed-header content negotiation passed deterministic fixtures |
+| Live Common Crawl | Catalogue succeeded; the selected CDX index query timed out. Two attempts, catalogue original retained, explicit error outcome; positive index normalization/bounds passed fixtures. No WARC retrieval |
+| Page/process lifecycle | Final browser closure stopped test nginx and local-model listeners; heartbeat expiry remains the fallback when a close event is lost. Original evidence retained and private canary absent from outbound fixture inputs. Multiple-page/reload/grace and parent-death paths also passed the regression suite |
+| Static and review checks | Python compilation, JavaScript syntax, whitespace checks, canonical-document relative links and AST-only graph update passed. Independent review fixes are covered by **11 focused regressions** |
+
+Public-source fixtures are synthetic; native model and document processing were
+real. Real-provider checks above are reported separately. These checks do not
+establish universal people-search coverage, correct attribution of namesakes or
+semantic truth of a source. Question interpretation validates literal provenance;
+it still requires review for meaning and identity. No success was inferred from
+an empty response, a login wall, an archive index record or collection volume.
+
+The first native browser trial exposed an unsupported inference in free-form
+model prose. Automatic findings now render verified source passages; optional
+advanced prose analysis stays visibly unverified. Unknown origins cannot become
+independent corroboration, and explicit same-target decisions reconcile claims
+through a reversible projection without rewriting stored claims or originals.
+
+Docker/SearXNG startup was not requalified in this delivery. No cloud AI,
+mandatory third-party framework, global package installation, push, PR, merge,
+publication or release was performed. The schema upgrade is local; rollback
+requires restoring the pre-upgrade backup with a compatible app version.
+
+---
+
+The following evidence describes earlier revisions.
+
 
 ## Source-driven workspace delivery — 2026-10-15
 
