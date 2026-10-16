@@ -1,5 +1,27 @@
 # Validation evidence
 
+## Docker-unavailable metasearch startup — 2026-10-16
+
+The service now reports an explicit error when its Docker engine check fails,
+with instructions to start Docker and retry. The browser polls background setup
+through its terminal result, preserves Stop during setup or retained-container
+recovery, and enables retry after a failure. Docker remains user-managed.
+
+- **345 Python tests passed in 41.507 seconds**, including authenticated HTTP
+  failure reporting, unchanged case/evidence exports, retained ownership receipts,
+  cancellation, and failure-to-ready retry with a simulated Docker runtime.
+- **25 UI controller tests passed**, including asynchronous failure polling without
+  a selected case, request errors, retry-to-ready and retained cleanup controls.
+- A real browser exercised the nginx-backed app in an isolated workspace with a
+  controlled Docker CLI fixture returning a stopped-engine failure. Both initial
+  startup and retry showed the actionable error and enabled another attempt.
+  No image pull, container creation, public-source collection or model launch ran.
+- The host Docker engine was running during verification (29.8.2). It was left
+  running; successful native SearXNG startup was not part of this qualification.
+- JavaScript syntax, Python compilation, whitespace checks and the AST-only
+  graph update passed. The full suite emitted nonfatal unclosed SQLite connection
+  ResourceWarnings; all tests completed successfully.
+
 ## Automatic question-driven investigations and Evidence Atlas — 2026-10-16
 
 Status: implemented and locally qualified. The primary Investigate/Continue

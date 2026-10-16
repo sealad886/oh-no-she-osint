@@ -13,7 +13,7 @@ import unittest
 import zipfile
 from unittest.mock import patch
 
-from local_osint.engine import Engine
+from local_osint.engine import Engine, InvalidInput
 from local_osint.server import LocalServer
 
 
@@ -53,6 +53,26 @@ class SourceAPIJourneyTests(unittest.TestCase):
                 return report
             time.sleep(.01)
         self.fail('The source worker did not finish.')
+
+    def test_metasearch_start_reports_docker_failure_without_changing_saved_work(self):
+        saved = self.engine.ingest(self.case, b'Existing public evidence', 'Saved original', 'Local import')
+        before = self.engine.export(self.case)
+        with patch.object(self.server.search_service, '_run', side_effect=InvalidInput('Container operation failed.')) as runtime:
+            code, _ = self.request('/api/search-service/start', {'settings': {'engines': ['bing']}})
+            self.assertEqual(code, 202)
+            self.server.search_service.worker.join(timeout=2)
+            code, service = self.request('/api/search-service')
+            self.assertEqual(code, 200)
+            self.assertEqual(service['state'], 'error')
+            self.assertIn('Start Docker', service['error'])
+            self.assertIn('retry', service['error'].lower())
+            self.assertEqual(self.request('/api/connectors')[1]['search_service']['state'], 'error')
+            self.assertEqual([call.args[0][0] for call in runtime.call_args_list], ['info'])
+        after = self.engine.export(self.case)
+        before.pop('exported_at')
+        after.pop('exported_at')
+        self.assertEqual(after, before)
+        self.assertEqual(self.engine.evidence(self.case, saved['id'])['sha256'], hashlib.sha256(b'Existing public evidence').hexdigest())
 
     def test_configuration_source_run_resume_and_export_preserve_originals(self):
         home = b'<h1>Community club</h1><p>Public information about our community activities, volunteer programmes and upcoming events.</p><a href="/volunteers">Volunteers</a>'

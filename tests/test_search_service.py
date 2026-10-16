@@ -145,6 +145,19 @@ class SearchServiceTests(unittest.TestCase):
             self.assertEqual(self.manager.status()["state"], "ready")
             self.manager.stop()
 
+    def test_docker_failure_retains_owned_container_receipt_for_later_cleanup(self):
+        self.manager.state = {"image_id": self.image_id, "engines": ["bing"],
+                              "container": "osint-search-" + self.manager.workspace + "-" + "b" * 16, "nonce": "b" * 16}
+        original = self.manager.state.copy()
+        with patch.object(self.manager, "_run", side_effect=InvalidInput("Container operation failed.")):
+            self.manager.start_async({})
+            self.manager.worker.join(timeout=2)
+            result = self.manager.status()
+        self.assertEqual(result["state"], "error")
+        self.assertTrue(result["owned_container"])
+        self.assertIn("Start Docker", result["error"])
+        self.assertEqual(self.manager.state, original)
+
     def test_async_failure_is_visible_and_does_not_claim_readiness(self):
         with patch.object(self.manager, "_run", side_effect=InvalidInput("Docker is not running.")):
             self.manager.start_async({})
@@ -152,6 +165,26 @@ class SearchServiceTests(unittest.TestCase):
             result = self.manager.status()
         self.assertNotEqual(result["state"], "ready")
         self.assertIn("Docker", result["error"])
+
+    def test_stopped_docker_fails_before_setup_and_can_retry_without_reopening(self):
+        original = {"image_id": self.image_id, "engines": ["bing"]}
+        self.manager.state = original.copy()
+        for settings in ({}, None):
+            with self.subTest(settings=settings), patch.object(self.manager, "_run", side_effect=InvalidInput("Container operation failed.")) as run:
+                self.manager.start_async(settings)
+                self.manager.worker.join(timeout=2)
+                result = self.manager.status()
+            self.assertEqual(result["state"], "error")
+            self.assertIn("Start Docker", result["error"])
+            self.assertIn("retry", result["error"].lower())
+            self.assertEqual(self.manager.state, original)
+            self.assertEqual([call.args[0][0] for call in run.call_args_list], ["info"])
+        with patch.object(self.manager, "_run", side_effect=self.fake_runtime):
+            self.manager.start_async({})
+            self.manager.worker.join(timeout=2)
+            self.assertEqual(self.manager.status()["state"], "ready")
+            self.assertEqual(self.manager.status()["error"], "")
+            self.manager.stop()
 
     def test_stop_cancels_delayed_setup_and_suppresses_late_start(self):
         entered = threading.Event()

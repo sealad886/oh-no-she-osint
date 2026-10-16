@@ -143,6 +143,15 @@ class SearchService:
         if threading.current_thread() is self.worker and self.cancel.is_set():
             raise InvalidInput("Search service setup/start was cancelled.")
 
+    def _check_docker(self):
+        if not self.binary:
+            raise InvalidInput("Docker is unavailable. Install and start Docker separately, then reopen the app.")
+        try:
+            self._run(["info", "--format", "{{.ServerVersion}}"], timeout=5)
+        except InvalidInput as exc:
+            self._check_cancelled()
+            raise InvalidInput("Cannot connect to Docker. Start Docker Desktop or your Docker engine, wait until it is ready, then retry Set up & start metasearch. If Docker is already running, check its connection and permissions.") from exc
+
     def _inspect_owned(self, cancellable=True):
         container, nonce = self.state.get("container"), self.state.get("nonce")
         if not isinstance(container, str) or not re.fullmatch(r"osint-search-[a-f0-9]{24}-[a-f0-9]{16}", container) or not isinstance(nonce, str):
@@ -169,7 +178,7 @@ class SearchService:
         try:
             record = self._inspect_owned() if self.state.get("container") else None
             ready = bool(record and record.get("State", {}).get("Running"))
-            return self._snapshot("ready" if ready else "stopped" if self.state.get("image_id") else "unavailable" if not self.binary else "not_configured")
+            return self._snapshot("ready" if ready else "error" if self.last_error else "stopped" if self.state.get("image_id") else "unavailable" if not self.binary else "not_configured")
         finally:
             self.lock.release()
 
@@ -180,6 +189,7 @@ class SearchService:
                     "ready": "Owned search service ready; HTTP is private to the container."}
         return {"state": state, "message": messages.get(state, self.message), "error": self.last_error,
                 "configured": bool(self.state.get("image_id")), "image": self.state.get("image", DEFAULT_IMAGE),
+                "owned_container": bool(self.state.get("container")),
                 "image_id": self.state.get("image_id", ""), "engines": self.state.get("engines", list(ENGINES)),
                 "upstream_fanout": len(self.state.get("engines", ENGINES)), "published_ports": False,
                 "transport": "container-private loopback via Docker exec", "license": "AGPL-3.0-or-later"}
@@ -206,9 +216,9 @@ class SearchService:
         if not isinstance(engines, list) or not engines or len(engines) > len(ENGINES) or any(item not in ENGINES for item in engines) or len(set(engines)) != len(engines):
             raise InvalidInput("Choose one or more of Bing, DuckDuckGo and Brave without duplicates.")
         with self._operation("setting_up"):
+            self._check_docker()
             if self.state.get("container"):
                 raise InvalidInput("Stop the owned search service before changing its setup.")
-            self._run(["info", "--format", "{{.ServerVersion}}"], timeout=5)
             self._run(["pull", image], timeout=180)
             self._check_cancelled()
             records = json.loads(self._run(["image", "inspect", image], timeout=10))
@@ -249,6 +259,8 @@ class SearchService:
         with self._operation("starting"):
             if settings is not None:
                 self.setup(settings)
+            else:
+                self._check_docker()
             self._check_cancelled()
             if self._inspect_owned():
                 return self.status()
@@ -377,4 +389,5 @@ class SearchService:
             if self.state:
                 _write_private(self.path, self.state)
             self.message = "Owned search service stopped. Its pinned image remains available."
+            self.last_error = ""
             return {"state": "stopped", "configured": bool(self.state.get("image_id"))}

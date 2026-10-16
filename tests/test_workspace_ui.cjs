@@ -7,7 +7,8 @@ const vm = require('node:vm');
 const path = require('node:path');
 
 function harness({view = {}, evidence = {}} = {}) {
-  const elements = new Map(), requests = [];
+  const elements = new Map(), requests = [], timers = new Map();
+  let timerId = 0;
   class Element {
     constructor(tag = 'div') { this.tagName = tag.toUpperCase(); this.children = []; this.listeners = {}; this.dataset = {}; this.value = ''; this.checked = false; this.disabled = false; this.open = false; this._text = ''; }
     get textContent() { return this._text + this.children.map(child => child.textContent || '').join(''); }
@@ -52,7 +53,7 @@ function harness({view = {}, evidence = {}} = {}) {
     {id: 'email_headers', label: 'Local headers', input_kinds: ['evidence_id'], outbound_fields: [], available: true},
     {id: 'searxng', label: 'Metasearch', input_kinds: ['query'], available: false, availability: 'unavailable', availability_message: 'Install optional runtime'}
   ];
-  const sandbox = {document, window: {addEventListener() {}}, crypto: {randomUUID: () => 'page-test'}, location: {hash: '', pathname: '/'}, history: {replaceState() {}}, URLSearchParams, URL, TextEncoder, setTimeout: () => 1, clearTimeout() {}, setInterval: () => 1, clearInterval() {}, console,
+  const sandbox = {document, window: {addEventListener() {}}, crypto: {randomUUID: () => 'page-test'}, location: {hash: '', pathname: '/'}, history: {replaceState() {}}, URLSearchParams, URL, TextEncoder, setTimeout: callback => { timers.set(++timerId, callback); return timerId; }, clearTimeout: id => timers.delete(id), setInterval: () => 1, clearInterval() {}, console,
     fetch: async (url, options = {}) => {
       requests.push({url, body: options.body ? JSON.parse(options.body) : null});
       const result = url === '/api/connectors' ? {connectors: catalogue, search_service: {state: 'unavailable'}}
@@ -67,8 +68,58 @@ function harness({view = {}, evidence = {}} = {}) {
   };
   vm.createContext(sandbox);
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../local_osint/static/app.js'), 'utf8'), sandbox);
-  return {elements, requests, sandbox, run: source => vm.runInContext(source, sandbox), walk};
+  return {elements, requests, timers, sandbox, run: source => vm.runInContext(source, sandbox), walk};
 }
+
+test('metasearch polls asynchronous setup failures and supports retry without a selected case', async () => {
+  const ui = harness(); await new Promise(resolve => setImmediate(resolve));
+  const fallback = ui.sandbox.fetch;
+  let outcome = {state: 'error', error: 'Docker is unavailable. Start Docker and retry.'};
+  ui.sandbox.fetch = async (url, options) => {
+    if (url === '/api/search-service/start') return {ok: true, json: async () => ({state: 'preparing'})};
+    if (url === '/api/search-service') return {ok: true, json: async () => outcome};
+    if (url === '/api/connectors') return {ok: true, json: async () => ({connectors: [], search_service: outcome})};
+    return fallback(url, options);
+  };
+  // The DOM fixture does not model input names from HTML.
+  const input = ui.sandbox.document.createElement('input'); input.name = 'metasearch-engine'; input.value = 'bing'; input.checked = true;
+  ui.elements.get('source-packs').append(input);
+  await ui.elements.get('start-search-service').fire('click');
+  assert.equal(ui.elements.get('start-search-service').disabled, true);
+  assert.equal(ui.elements.get('stop-search-service').hidden, false);
+  assert.equal(ui.timers.size, 1);
+  const poll = [...ui.timers.values()][0]; ui.timers.clear(); await poll();
+  assert.match(ui.elements.get('search-service-status').textContent, /Start Docker/);
+  assert.equal(ui.elements.get('start-search-service').disabled, false);
+  assert.equal(ui.timers.size, 0);
+  // Retry observes a successful terminal state and keeps Start disabled.
+  ui.elements.get('source-packs').append(input);
+  outcome = {state: 'ready'};
+  await ui.elements.get('start-search-service').fire('click');
+  const retryPoll = [...ui.timers.values()][0]; ui.timers.clear(); await retryPoll();
+  assert.match(ui.elements.get('search-service-status').textContent, /ready/);
+  assert.equal(ui.elements.get('start-search-service').disabled, true);
+  assert.equal(ui.timers.size, 0);
+});
+
+test('metasearch request failures replace preparing status and leave retry enabled', async () => {
+  const ui = harness(); await new Promise(resolve => setImmediate(resolve));
+  const fallback = ui.sandbox.fetch;
+  ui.sandbox.fetch = async (url, options) => url === '/api/search-service/start'
+    ? {ok: false, json: async () => ({error: 'Network collection is disabled.'})} : fallback(url, options);
+  const input = ui.sandbox.document.createElement('input'); input.name = 'metasearch-engine'; input.value = 'bing'; input.checked = true;
+  ui.elements.get('source-packs').append(input);
+  await ui.elements.get('start-search-service').fire('click');
+  assert.match(ui.elements.get('search-service-status').textContent, /Network collection is disabled/);
+  assert.equal(ui.elements.get('start-search-service').disabled, false);
+});
+
+test('failed metasearch with an ownership receipt keeps Stop available for recovery', async () => {
+  const ui = harness(); await new Promise(resolve => setImmediate(resolve));
+  ui.run("renderSearchService({state:'error', error:'Start Docker and retry.', owned_container:true})");
+  assert.equal(ui.elements.get('stop-search-service').hidden, false);
+  assert.equal(ui.elements.get('start-search-service').disabled, false);
+});
 
 test('source configuration round trips approved public inputs and unlimited page-scoped mode', async () => {
   const ui = harness();

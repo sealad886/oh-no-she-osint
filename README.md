@@ -285,6 +285,14 @@ an immutable local image ID; container creation uses that ID with pulling disabl
 Choose Bing, DuckDuckGo and/or Brave. Stop the owned service before changing setup.
 The app does not install or stop Docker itself.
 
+Setup checks the Docker engine before downloading an image or creating a container.
+If Docker is stopped or inaccessible, the service panel shows an error with recovery
+steps. Start Docker Desktop (or your Docker engine), wait until it is ready, then
+press **Set up & start metasearch** again; you do not need to reopen the app.
+If Docker is already running, check its connection and permissions. Progress and
+errors update automatically, and **Stop metasearch** can cancel an active setup.
+Your saved cases, evidence and pinned image settings survive a failed start.
+
 No host port is published. A fixed Docker-exec client contacts container-private
 loopback; the browser cannot choose another metasearch endpoint. The container
 has no host bind mounts or Docker socket, drops capabilities and applies bounded

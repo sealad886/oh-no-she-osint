@@ -2,6 +2,8 @@
 const $ = id => document.getElementById(id);
 let currentCase = '', currentSubject = '', optionsCase = '', status = {}, requestVersion = 0, detailVersion = 0, aiReady = false;
 let promptDefaults = {}, searchProviders = [];
+let searchServiceTimer, searchServiceState = 'stopped', searchServiceOwned = false;
+const searchServiceBusyStates = ['preparing', 'setting_up', 'starting', 'stopping', 'busy', 'loading', 'running'];
 let atlasEvidence = {caseId: '', items: []};
 const promptLabels = {plan: 'Plan the next useful action', repetition: 'Recover from repeated or stalled actions', provider_failure: 'Recover from search-provider failure', no_useful_pages: 'Recover when pages are not useful', identity_ambiguity: 'Handle uncertain identity matches', draft: 'Write the final sourced draft', action: 'Choose the next queued action', extract: 'Extract observations with exact supporting passages'};
 
@@ -48,6 +50,7 @@ function closePageLease() {
   pageLeaving = true;
   pageLeaseOpened = false;
   clearInterval(pageLeaseTimer);
+  clearTimeout(searchServiceTimer);
   if (!pageLeaseEnabled) return;
   fetch('/api/page/close', {
     method: 'POST', credentials: 'same-origin', keepalive: true,
@@ -67,7 +70,7 @@ function action(element, callback, event = 'click') {
     if (button) button.disabled = true;
     try { await callback(e); }
     catch (error) { notice(error.message || 'Operation failed. Try again.'); }
-    finally { if (button) button.disabled = false; updateRunControls(); }
+    finally { if (button) button.disabled = false; updateRunControls(); updateSearchServiceControls(); }
   });
 }
 async function loadCases(preferred = currentCase) {
@@ -736,14 +739,38 @@ async function loadConnectors() {
 }
 function renderSearchService(service) {
   const state = service.state || 'stopped';
+  searchServiceState = state;
+  searchServiceOwned = service.owned_container === true;
+  clearTimeout(searchServiceTimer);
   $('search-service-status').textContent = 'Local metasearch: ' + state + (service.error || service.reason || service.message ? ' · ' + (service.error || service.reason || service.message) : '') + (service.upstream_fanout ? ` · up to ${service.upstream_fanout} external engines per search` : '');
   if (!searchServiceLoaded) {
     $('search-service-image').value = service.image || '';
     if (service.engines) for (const input of document.querySelectorAll('[name="metasearch-engine"]')) input.checked = service.engines.includes(input.value);
     searchServiceLoaded = true;
   }
-  $('start-search-service').disabled = ['ready', 'running', 'loading', 'starting'].includes(state);
-  $('stop-search-service').hidden = !['ready', 'running', 'loading', 'starting'].includes(state);
+  updateSearchServiceControls();
+  if (!pageLeaving && searchServiceBusyStates.includes(state)) searchServiceTimer = setTimeout(refreshSearchService, 1500);
+}
+function updateSearchServiceControls() {
+  const active = searchServiceState === 'ready' || searchServiceBusyStates.includes(searchServiceState);
+  $('start-search-service').disabled = active;
+  $('stop-search-service').hidden = !active && !searchServiceOwned;
+}
+async function refreshSearchService() {
+  if (pageLeaving) return;
+  try {
+    const service = await api('/api/search-service');
+    if (pageLeaving) return;
+    renderSearchService(service);
+    if (!searchServiceBusyStates.includes(service.state)) {
+      await loadConnectors();
+      if (service.error) notice(service.error);
+      else if (service.state === 'ready') notice('Local metasearch is ready.');
+    }
+  } catch (error) {
+    renderSearchService({state: 'error', error: error.message || 'Could not read metasearch status. Retry setup.'});
+    notice(error.message);
+  }
 }
 function researchAction(area, label, callback) {
   const button = node('button', label, 'secondary'); button.type = 'button'; action(button, callback); area.append(button); return button;
@@ -987,9 +1014,15 @@ action($('start-search-service'), async () => {
   const engines = [...document.querySelectorAll('[name="metasearch-engine"]:checked')].map(input => input.value);
   if (!engines.length) throw new Error('Select at least one metasearch engine.');
   const image = $('search-service-image').value.trim();
-  $('search-service-status').textContent = 'Preparing owned metasearch. The first image download can take a few minutes…';
-  const service = await api('/api/search-service/start', {settings: {engines, ...(image ? {image} : {})}});
-  renderSearchService(service); await loadConnectors(); notice('Metasearch setup requested. Service status shows availability and setup errors.');
+  renderSearchService({state: 'preparing', message: 'Checking Docker and preparing owned metasearch. The first image download can take a few minutes…'});
+  try {
+    const service = await api('/api/search-service/start', {settings: {engines, ...(image ? {image} : {})}});
+    renderSearchService(service);
+    notice(service.error || 'Metasearch setup requested. Watch service status for progress.');
+  } catch (error) {
+    renderSearchService({state: 'error', error: error.message});
+    throw error;
+  }
 });
 action($('stop-search-service'), async () => { renderSearchService(await api('/api/search-service/stop', {})); await loadConnectors(); });
 action($('close-connector'), () => $('connector-dialog').close());
