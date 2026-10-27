@@ -188,9 +188,16 @@ class SearchServiceTests(unittest.TestCase):
                 return self.fake_runtime(args, **kwargs)
             with patch.object(self.manager, "_run", side_effect=unavailable):
                 state = self.manager.status()
+                with self.assertRaises(InvalidInput):
+                    self.manager.start()
             self.assertNotEqual(state["state"], "ready")
             self.assertTrue(state["owned_container"])
             self.assertIn("Stop", state["message"])
+            with patch.object(self.manager, "_request", side_effect=InvalidInput("Gateway unavailable")):
+                self.assertNotEqual(self.manager.status()["state"], "ready")
+                with self.assertRaises(InvalidInput):
+                    self.manager.start()
+            self.assertEqual(self.manager.status()["state"], "ready")
             self.manager.stop()
 
     def test_existing_stopped_container_cannot_shortcut_startup_as_ready(self):

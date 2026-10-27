@@ -154,6 +154,23 @@ class ReliabilityRecoveryTests(unittest.TestCase):
         self.assertTrue(all(t['state'] == 'cooldown' for t in self.workspace.tasks(self.case)))
         self.assertEqual(self.workspace.tasks(self.case)[0]['attempts'], 1)
 
+    def test_new_failures_keep_transient_and_explicit_rate_limit_delays(self):
+        for index, (status, summary, expected) in enumerate([
+            ('error', 'Destination returned HTTP 503.', 60),
+            ('error', 'Destination returned HTTP 429.', 300),
+            ('rate_limited', 'Public source requests must wait.', 300),
+        ]):
+            with self.subTest(status=status, summary=summary):
+                runner = self.runner()
+                runner.step('Public source attempt', lambda: {'_action_status': status, 'summary': summary},
+                            tool='crossref', arguments={'query': 'Ada Public ' + str(index)})
+                task_id = runner.report['steps'][-1]['task_id']
+                task = next(task for task in self.workspace.tasks(self.case) if task['id'] == task_id)
+                self.assertEqual(task['state'], 'cooldown')
+                finished = datetime.fromisoformat(runner.report['steps'][-1]['finished_at'])
+                delay = (datetime.fromisoformat(task['retry_at']) - finished).total_seconds()
+                self.assertAlmostEqual(delay, expected, delta=1)
+
     def test_legacy_rate_limit_without_deadline_keeps_five_minute_cooldown(self):
         task = self.workspace.enqueue(self.case, 'web_search', {'query': '"Ada Public"', 'provider': 'duckduckgo'})
         self.workspace.start_action(self.case, task['id'], 'old-run')

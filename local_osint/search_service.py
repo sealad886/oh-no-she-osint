@@ -194,19 +194,19 @@ class SearchService:
             return self._snapshot(self.phase or "busy")
         try:
             record = self._inspect_owned(timeout=2) if self.state.get("container") else None
-            ready = False
-            if record and record.get("State", {}).get("Running"):
-                try:
-                    # Keep status below nginx's request timeout; ownership was
-                    # just verified, so no second container inspection is needed.
-                    ready = self._request("GET", "/healthz", timeout=2)["status"] == 200
-                except InvalidInput:
-                    pass
+            ready = bool(record and record.get("State", {}).get("Running") and self._healthy())
             if record and not ready and not self.last_error:
                 return self._snapshot("unhealthy")
             return self._snapshot("error" if self.last_error else "ready" if ready else "stopped" if self.state.get("image_id") else "unavailable" if not self.binary else "not_configured")
         finally:
             self.lock.release()
+
+    def _healthy(self):
+        """Probe already-verified ownership without repeating container inspection."""
+        try:
+            return self._request("GET", "/healthz", timeout=2)["status"] == 200
+        except InvalidInput:
+            return False
 
     def _snapshot(self, state):
         messages = {"setting_up": "Preparing and pinning the official search image. This may take several minutes.",
@@ -298,11 +298,7 @@ class SearchService:
             if existing:
                 if not existing.get("State", {}).get("Running"):
                     raise InvalidInput("The owned search container is stopped. Use Stop metasearch, then Set up & start metasearch to retry.")
-                try:
-                    healthy = self._request("GET", "/healthz", timeout=2)["status"] == 200
-                except InvalidInput:
-                    healthy = False
-                if not healthy:
+                if not self._healthy():
                     raise InvalidInput("SearXNG is not responding. Use Stop metasearch, then Set up & start metasearch to retry.")
                 return self._snapshot("ready")
             if self.state.get("container"):

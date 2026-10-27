@@ -147,3 +147,25 @@ two guards, durable failed tasks never reactivated, manager ownership narrower
 than service lifetime, and synchronous cleanup longer than the proxy deadline.
 Regressions now exercise those shared boundaries and distinguish local lifecycle
 success from upstream search availability and factual target coverage.
+
+## Simplification — 2026-10-27
+
+Retry-delay selection now has one owner, `workspace.retry_delay_seconds`, shared
+by new failures and saved failure recovery. It selects 60/300 seconds from an
+exact HTTP 429 status or an explicit rate-limited outcome. Eligibility, attempt
+limits and current-versus-saved time anchors stay with their callers. The shared
+exact-status recognizer replaces the new-failure substring check; collection’s
+existing HTTP status messages retain their behavior.
+
+`SearchService._healthy` owns the fixed two-second HTTP-200 readiness probe used
+by status and startup. Ownership inspection and stopped-container checks remain
+at their entrypoints. Separate workers, lifetime states and standalone diagnostics
+entrypoints remain necessary boundaries. No schema, dependencies, UI or defaults
+changed, and no migration or live provider collection was needed.
+
+Fresh qualification passed 378 Python tests with ResourceWarnings treated as
+errors (75.874s), 59 focused reliability tests, and 28 UI controller tests.
+JavaScript syntax, Python compilation, whitespace and AST graph refresh passed.
+The initial system-disk-full baseline failure was environmental; the same 58-test
+baseline passed with private disposable files on codecache before refactoring.
+Consolidation remains local-only under the user’s existing instruction.

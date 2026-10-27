@@ -15,8 +15,8 @@ from .engine import InvalidInput, now, field
 from .page_quality import assess_page
 from .relevance import local_match, rank_key, words, outbound_private_clues
 from .prompts import validate_prompts
-from .workspace import (Workspace, AUTOMATIC_ATTEMPT_LIMIT, TRANSIENT_RETRY_SECONDS, RATE_LIMIT_RETRY_SECONDS,
-                        RECOVERABLE_SEARCH_CONNECTORS, transient_source_failure)
+from .workspace import (Workspace, AUTOMATIC_ATTEMPT_LIMIT, TRANSIENT_RETRY_SECONDS,
+                        RECOVERABLE_SEARCH_CONNECTORS, transient_source_failure, retry_delay_seconds)
 
 REPORT_SOURCE = 'local-osint:investigation-report'
 PROPERTIES = {'P31': 'Type', 'P856': 'Official website (candidate claim)', 'P17': 'Country',
@@ -269,7 +269,8 @@ class Investigation:
                 retry = None
                 if retryable and (tool in RECOVERABLE_SEARCH_CONNECTORS or action_status == 'rate_limited') and task['attempts'] < AUTOMATIC_ATTEMPT_LIMIT:
                     from datetime import datetime, timedelta, timezone
-                    retry = (datetime.now(timezone.utc) + timedelta(seconds=RATE_LIMIT_RETRY_SECONDS if action_status == 'rate_limited' or 'HTTP 429' in entry.get('error', '') else TRANSIENT_RETRY_SECONDS)).isoformat()
+                    delay = retry_delay_seconds(entry.get('error'), rate_limited=action_status == 'rate_limited')
+                    retry = (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()
                 finished_state = ('cooldown' if retry else 'blocked' if action_status in {'blocked', 'uninterpretable'} else
                     'complete' if entry.get('ok') else 'interrupted_after_dispatch' if entry['status'] == 'cancelled' else 'failed')
                 self.workspace.finish_action(self.case_id, task['id'],

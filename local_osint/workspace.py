@@ -39,6 +39,12 @@ def transient_source_failure(error, http_status=None):
     return any(message in (error or '') for message in (
         'Collection timed out.', 'HTTPS collection failed.'))
 
+
+def retry_delay_seconds(error=None, *, rate_limited=False):
+    """Use the same delay for new failures and saved failure recovery."""
+    return RATE_LIMIT_RETRY_SECONDS if rate_limited or re.search(r'\bHTTP\s+429\b', error or '') else TRANSIENT_RETRY_SECONDS
+
+
 TABLES = [
     """CREATE TABLE workspace_settings (case_id TEXT PRIMARY KEY REFERENCES cases(id),
         settings TEXT NOT NULL, updated_at TEXT NOT NULL)""",
@@ -332,8 +338,7 @@ class Workspace:
                     continue
                 retry_at = task['retry_at']
                 if not retry_at:
-                    seconds = RATE_LIMIT_RETRY_SECONDS if re.search(r'\bHTTP\s+429\b', task['error'] or '') else TRANSIENT_RETRY_SECONDS
-                    retry_at = (datetime.fromisoformat(task['updated_at']) + timedelta(seconds=seconds)).isoformat()
+                    retry_at = (datetime.fromisoformat(task['updated_at']) + timedelta(seconds=retry_delay_seconds(task['error']))).isoformat()
                 if retry_at > now():
                     continue
                 db.execute("UPDATE workspace_tasks SET state='pending',retry_at=NULL,updated_at=? WHERE id=?", (now(), task['id']))
