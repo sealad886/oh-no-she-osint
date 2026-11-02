@@ -68,6 +68,16 @@ The registry declares inputs, destination families, target types, provenance,
 licence, bounds and current availability. Settings select trusted implementations;
 they cannot define executable handlers or arbitrary endpoints.
 
+The shared local readiness report powers `osint doctor`, the authenticated
+readiness API and the browser's readiness panel/source cards. Implementation
+availability, local prerequisites, process network permission and the selected
+case's last observed source health remain separate fields. Public sources with
+no recorded outcome are unverified. Recorded outcomes include their observation
+time and cooldown deadline; neither an installed tool nor a previous success
+establishes current provider availability. Readiness inspection performs no
+public requests, service startup or installation. Normal explicit source actions
+produce the recorded health evidence through the existing dispatcher.
+
 Case source settings are:
 
 | Key | Contract |

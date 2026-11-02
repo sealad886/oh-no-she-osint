@@ -110,6 +110,18 @@ licence and availability. **Configure & run** submits only the shown inputs and
 saves the action. A single source can run without a full investigation; local
 tools remain available in offline mode.
 
+**Source and local tool readiness** shows local prerequisites, process network
+permission and the last recorded source outcomes for the selected case. Refreshing
+readiness does not contact public sources, start a service or install anything.
+Sources with no recorded outcome remain unverified; a previous success is not a
+guarantee of current availability. Source cards retain observed timestamps and
+active cooldowns separately from prerequisite availability.
+
+The same local report is available from `osint doctor` (or
+`.venv/bin/python -m local_osint doctor`). Use the command's `--help` for selecting
+a workspace and case. Source actions remain explicit and retain their normal
+scope checks, collection limits and attempt history.
+
 | Source tool | Input | Result |
 | --- | --- | --- |
 | Website source discovery | Public HTTPS URL | Same-host links, feeds, sitemap references and structured source metadata; eligible leads enter the queue |

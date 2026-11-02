@@ -285,9 +285,16 @@ class Handler(BaseHTTPRequestHandler):
                     self.reply(200, engine.cases())
                 elif path == '/api/connectors':
                     from .connectors import catalogue
+                    from .readiness import report
+                    readiness = report(engine, case_id=case_id or None, allow_network=self.server.allow_network,
+                                       ai=self.server.ai, search_service=self.server.search_service)
                     service = self.server.search_service.status()
-                    self.reply(200, {'connectors': catalogue({'search_service': self.server.search_service}, service_status=service),
+                    self.reply(200, {'connectors': catalogue({'search_service': self.server.search_service}, service_status=service, readiness=readiness),
                         'search_service': service})
+                elif path == '/api/readiness':
+                    from .readiness import report
+                    self.reply(200, report(engine, case_id=case_id or None, allow_network=self.server.allow_network,
+                                           ai=self.server.ai, search_service=self.server.search_service))
                 elif path == '/api/search-service':
                     self.reply(200, self.server.search_service.status())
                 elif path == '/api/diagnostics':

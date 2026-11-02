@@ -74,6 +74,26 @@ class CLITests(unittest.TestCase):
         self.assertNotIn('\x1b', out)
         self.assertIn('\\u001b', out)
 
+    def test_doctor_reports_local_readiness_without_constructing_services_or_network(self):
+        with patch('local_osint.__main__.LocalServer', side_effect=AssertionError('server construction')), \
+             patch('local_osint.ai.LocalAI', side_effect=AssertionError('AI construction')), \
+             patch('local_osint.search_service.SearchService', side_effect=AssertionError('service construction')), \
+             patch('socket.getaddrinfo', side_effect=AssertionError('DNS')), \
+             patch('socket.socket', side_effect=AssertionError('socket')), \
+             patch('subprocess.Popen', side_effect=AssertionError('process')):
+            code, out, err = self.run_command(['doctor'])
+            self.assertEqual(code, 0, err)
+            self.assertFalse(json.loads(out)['network_permitted'])
+            code, out, err = self.run_command(['doctor', '--allow-network'])
+            self.assertEqual(code, 0, err)
+            result = json.loads(out)
+            self.assertTrue(result['network_permitted'])
+            self.assertFalse(result['case_scoped'])
+        code, out, _ = self.run_command(['case', 'Doctor fixture'])
+        case = json.loads(out)
+        self.assertTrue(json.loads(self.run_command(['doctor', '--case', case['id']])[1])['case_scoped'])
+        self.assertEqual(self.run_command(['doctor', '--case', 'missing'])[0], 1)
+
 
 if __name__ == '__main__':
     unittest.main()

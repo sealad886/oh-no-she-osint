@@ -83,6 +83,22 @@ class SourceAPIJourneyTests(unittest.TestCase):
         connector = next(item for item in result['connectors'] if item['id'] == 'searxng')
         self.assertEqual(connector['available'], result['search_service']['state'] == 'ready')
 
+    def test_authenticated_readiness_uses_saved_case_health_without_runtime_probes(self):
+        self.server.workspace.update_health(self.case, 'github_public', 'ready')
+        with patch.object(self.server.search_service, 'status', side_effect=AssertionError('Docker probe')), \
+             patch.object(self.server.ai, 'status', side_effect=AssertionError('AI probe')), \
+             patch.object(self.server.ai, 'start', side_effect=AssertionError('AI startup')), \
+             patch('subprocess.Popen', side_effect=AssertionError('process startup')):
+            self.assertEqual(self.request('/api/readiness', auth=False)[0], 401)
+            code, report = self.request('/api/readiness?case=' + self.case)
+            self.assertEqual(code, 200)
+            github = next(item for item in report['sources'] if item['id'] == 'github_public')
+            self.assertEqual(github['health']['state'], 'last_success')
+            self.assertTrue(report['network_permitted'])
+            self.server.allow_network = False
+            self.assertFalse(self.request('/api/readiness')[1]['network_permitted'])
+            self.assertEqual(self.request('/api/readiness?case=missing')[0], 400)
+
     def test_configuration_source_run_resume_and_export_preserve_originals(self):
         home = b'<h1>Community club</h1><p>Public information about our community activities, volunteer programmes and upcoming events.</p><a href="/volunteers">Volunteers</a>'
         profile = b'<h1>Bea Public</h1><p>Bea Public organizes community events and volunteer training at this local organization. This is a public staff introduction.</p>'

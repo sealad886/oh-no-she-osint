@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 
-function harness({view = {}, evidence = {}} = {}) {
+function harness({view = {}, evidence = {}, readiness = {checked_at: '2026-11-02T12:00:00+00:00', network_permitted: true, components: [], sources: []}} = {}) {
   const elements = new Map(), requests = [], timers = new Map();
   let timerId = 0;
   class Element {
@@ -57,6 +57,7 @@ function harness({view = {}, evidence = {}} = {}) {
     fetch: async (url, options = {}) => {
       requests.push({url, body: options.body ? JSON.parse(options.body) : null});
       const result = url === '/api/connectors' ? {connectors: catalogue, search_service: {state: 'unavailable'}}
+        : url.startsWith('/api/readiness') ? readiness
         : url === '/api/status' ? {network: true} : url === '/api/prompts' ? {defaults: {}, providers: [{id:'bing',label:'Bing'},{id:'duckduckgo',label:'DuckDuckGo'}]}
         : url === '/api/ai' ? {state: 'stopped'} : url === '/api/cases' ? []
         : url.startsWith('/api/view?') ? view
@@ -176,6 +177,83 @@ test('local source remains usable offline and unavailable optional source is dis
   assert.equal(buttons.find(button => button.dataset.connector === 'email_headers').disabled, false);
   assert.equal(buttons.find(button => button.dataset.connector === 'public_profile').disabled, true);
   assert.equal(buttons.find(button => button.dataset.connector === 'searxng').disabled, true);
+});
+
+test('readiness refresh remains a local read and shows prerequisites independently of source health', async () => {
+  const ui = harness({readiness: {
+    checked_at: '2026-11-02T12:00:00+00:00', network_permitted: true,
+    components: [{id:'local_ai',label:'Local AI',state:'needs_setup',message:'Install a local runtime <img src=x>'}],
+    sources: [{id:'public_profile',prerequisites_ready:true,network_required:true,network_permitted:true,available:true,state:'unverified',message:'Source availability is unverified.',health:{state:'unverified'}}]
+  }});
+  await new Promise(resolve => setImmediate(resolve));
+  ui.run("currentCase='case-a'");
+  const before = ui.requests.length;
+  await ui.elements.get('refresh-readiness').fire('click');
+  assert.deepEqual(ui.requests.slice(before), [{url:'/api/readiness?case=case-a',body:null}]);
+  assert.match(ui.elements.get('readiness-components').textContent, /needs setup/);
+  assert.equal(ui.walk(ui.elements.get('readiness-components')).some(element => element.tagName === 'IMG'), false);
+  const card = ui.elements.get('connector-catalogue');
+  assert.match(card.textContent, /unverified/);
+  assert.equal(ui.walk(card).find(element => element.dataset.connector === 'public_profile').disabled, false);
+});
+
+test('source readiness retains observed time and enforces a recorded cooldown', async () => {
+  const ui = harness({readiness: {
+    checked_at:'2026-11-02T12:00:00+00:00',network_permitted:true,components:[],
+    sources:[{id:'public_profile',prerequisites_ready:true,network_required:true,network_permitted:true,available:false,state:'cooldown',
+      health:{state:'cooldown',observed_state:'rate_limited',checked_at:'2026-11-02T11:59:00+00:00',retry_at:'2026-11-02T12:10:00+00:00',message:'Wait before retrying.'}}]
+  }});
+  await new Promise(resolve => setImmediate(resolve));
+  const card = ui.elements.get('connector-catalogue');
+  assert.match(card.textContent, /rate limited/);
+  assert.match(card.textContent, /2026-11-02T12:10:00/);
+  assert.equal(ui.walk(card).find(element => element.tagName === 'TIME').dateTime, '2026-11-02T11:59:00+00:00');
+  assert.equal(ui.walk(card).find(element => element.dataset.connector === 'public_profile').disabled, true);
+});
+
+test('fresh readiness replaces unavailable catalogue state for cards and an open source form', async () => {
+  const ui = harness(); await new Promise(resolve => setImmediate(resolve));
+  const fallback = ui.sandbox.fetch;
+  let available = false;
+  ui.sandbox.fetch = async (url, options) => {
+    if (url === '/api/connectors') return {ok:true,json:async()=>({connectors:[{id:'public_profile',label:'Public profile',input_kinds:['username','site'],sites:['github'],outbound_fields:['username','site'],available:false}],search_service:{state:'unavailable'}})};
+    if (url.startsWith('/api/readiness')) return {ok:true,json:async()=>({checked_at:'2026-11-02T12:00:00+00:00',network_permitted:true,components:[],sources:[{id:'public_profile',available,prerequisites_ready:true,network_required:true,network_permitted:true,state:available?'unverified':'cooldown',health:{state:available?'unverified':'cooldown'}}]})};
+    return fallback(url, options);
+  };
+  await ui.run("currentCase='case-a'; loadConnectors()");
+  await ui.run("openConnector(connectors[0], {username:'researcher',site:'github'})");
+  const run = ui.walk(ui.elements.get('connector-catalogue')).find(element => element.dataset.connector === 'public_profile');
+  assert.equal(run.disabled, true);
+  assert.equal(ui.elements.get('run-connector').disabled, true);
+  available = true;
+  await ui.elements.get('refresh-readiness').fire('click');
+  assert.equal(run.disabled, false);
+  assert.equal(ui.elements.get('run-connector').disabled, false);
+  assert.doesNotMatch(ui.elements.get('source-packs').textContent, /unavailable/);
+  available = false;
+  await ui.elements.get('refresh-readiness').fire('click');
+  assert.equal(run.disabled, true);
+  assert.equal(ui.elements.get('run-connector').disabled, true);
+  await ui.elements.get('connector-form').fire('submit');
+  assert.equal(ui.requests.some(request => request.url === '/api/action'), false);
+  assert.equal(ui.elements.get('run-connector').disabled, true);
+});
+
+test('late readiness response cannot replace another case outcome', async () => {
+  const ui = harness(); await new Promise(resolve => setImmediate(resolve));
+  let resolveEarlier;
+  const fallback = ui.sandbox.fetch;
+  ui.sandbox.fetch = async (url, options) => {
+    if (url === '/api/readiness?case=case-a') return new Promise(resolve => { resolveEarlier = resolve; });
+    if (url === '/api/readiness?case=case-b') return {ok:true,json:async()=>({checked_at:'CURRENT_CASE',network_permitted:false,components:[],sources:[]})};
+    return fallback(url, options);
+  };
+  const earlier = ui.run("currentCase='case-a'; refreshReadiness()");
+  await ui.run("currentCase='case-b'; refreshReadiness()");
+  resolveEarlier({ok:true,json:async()=>({checked_at:'PREVIOUS_CASE',network_permitted:true,components:[],sources:[]})});
+  await earlier;
+  assert.match(ui.elements.get('readiness-status').textContent, /CURRENT_CASE/);
+  assert.doesNotMatch(ui.elements.get('readiness-status').textContent, /PREVIOUS_CASE/);
 });
 
 test('source action submits only explicit form fields and rejects stale case dialog', async () => {

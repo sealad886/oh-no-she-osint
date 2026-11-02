@@ -29,7 +29,7 @@ def write_private(path, value):
 def parser():
     root = argparse.ArgumentParser(prog="osint", description="Private local evidence workspace. No network access unless explicitly enabled.")
     commands = root.add_subparsers(dest="command", required=True)
-    for name, help in [("serve", "Open the local browser workspace"), ("case", "Create a case"), ("cases", "List cases"), ("import", "Import UTF-8 evidence"), ("search", "Search a case"), ("entity", "Inspect an indicator and shared sources"), ("export", "Export a case to a new private file"), ("discover", "Discover public-source candidates for a person, organization or topic"), ("research", "Collect public DNS, registration, TLS and website signals for a domain"), ("fetch", "Collect one public HTTPS page"), ("investigate", "Automatically collect a subject dossier"), ("backup", "Create an integrity-checked database backup")]:
+    for name, help in [("serve", "Open the local browser workspace"), ("doctor", "Inspect local prerequisites and saved source health without live checks"), ("case", "Create a case"), ("cases", "List cases"), ("import", "Import UTF-8 evidence"), ("search", "Search a case"), ("entity", "Inspect an indicator and shared sources"), ("export", "Export a case to a new private file"), ("discover", "Discover public-source candidates for a person, organization or topic"), ("research", "Collect public DNS, registration, TLS and website signals for a domain"), ("fetch", "Collect one public HTTPS page"), ("investigate", "Automatically collect a subject dossier"), ("backup", "Create an integrity-checked database backup")]:
         sub = commands.add_parser(name, help=help)
         sub.add_argument("--data-dir", help="Private data directory (default: .local-osint)")
         sub.add_argument("--config", type=Path, help="Optional TOML file with data_dir and port")
@@ -43,6 +43,10 @@ def parser():
             sub.add_argument("--allow-network", action="store_true", help="Permit explicitly requested public signal collection")
             sub.add_argument("--offline", dest="allow_network", action="store_false", help="Disable every collection operation")
             sub.add_argument("--open", action="store_true", help="Open browser automatically")
+        elif name == "doctor":
+            sub.add_argument("--case", dest="case_id", help="Include only this case's saved source observations")
+            sub.add_argument("--allow-network", action="store_true", help="Report collection permission as enabled; performs no network checks")
+            sub.add_argument("--offline", dest="allow_network", action="store_false", help="Report collection permission as disabled (default)")
         elif name == "case":
             sub.add_argument("name")
             sub.add_argument("--type", choices=["person", "organization", "domain", "topic", "other"], default="topic")
@@ -155,7 +159,10 @@ def main(argv=None):
                 return serve(engine, args, port)
             finally:
                 signal.signal(signal.SIGTERM, previous_termination)
-        if args.command == "case":
+        if args.command == "doctor":
+            from .readiness import report
+            result = report(engine, case_id=args.case_id, allow_network=args.allow_network)
+        elif args.command == "case":
             result = engine.create_case(args.name, args.type, args.alias, args.identifier)
         elif args.command == "cases":
             result = engine.cases()

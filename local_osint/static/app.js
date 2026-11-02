@@ -80,7 +80,7 @@ function action(element, callback, event = 'click') {
     if (button) button.disabled = true;
     try { await callback(e); }
     catch (error) { notice(error.message || 'Operation failed. Try again.'); }
-    finally { if (button) button.disabled = false; updateRunControls(); updateSearchServiceControls(); }
+    finally { if (button) button.disabled = false; updateRunControls(); updateSearchServiceControls(); updateConnectorControls(); }
   });
 }
 async function loadCases(preferred = currentCase) {
@@ -684,6 +684,9 @@ action($('stop-ai'), async () => { await api('/api/ai/stop', {}); await refreshA
 
 let connectors = [], researchTimer, researchCase = '', connectorCase = '', selectedConnector = null;
 let researchLoading = false, sourceSettingsDirty = false, researchSignature = '', searchServiceLoaded = false, relationshipWorkspace = null, connectorOpenVersion = 0;
+let readinessCase = '', readinessVersion = 0, readinessHealthSignature = '';
+let sourceReadiness = new Map(), connectorInputReady = true;
+const sourceReadinessElements = new Map();
 const connectorFallbackFields = {
   crossref: ['query'], github_public: ['username'], public_profile: ['username', 'site'],
   website_sources: ['url'], wayback: ['url'], email_headers: ['evidence_id'],
@@ -691,6 +694,7 @@ const connectorFallbackFields = {
 };
 const sourceFieldLabels = {query: 'Approved public query', username: 'Approved public username', site: 'Public profile site', url: 'Public HTTPS URL', evidence_id: 'Saved evidence ID'};
 function connectorReady(connector) {
+  if (sourceReadiness.has(connector.id)) return sourceReadiness.get(connector.id).available !== false;
   if (typeof connector.availability === 'boolean') return connector.availability;
   return connector.available !== false && connector.availability?.ready !== false && connector.ready !== false;
 }
@@ -728,25 +732,82 @@ async function loadConnectors() {
   const hadPackOptions = $('source-packs').childElementCount > 0;
   const packs = $('source-packs'); packs.replaceChildren();
   const catalogue = $('connector-catalogue'); catalogue.replaceChildren();
+  sourceReadinessElements.clear();
   for (const connector of connectors) {
     const enabled = connectorReady(connector), online = connectorOnline(connector);
     const label = node('label'), input = node('input'); input.type = 'checkbox'; input.name = 'source-pack'; input.value = connector.id;
     input.checked = hadPackOptions && selectedPacks.includes(connector.id);
-    label.append(input, node('span', connector.label + (!enabled ? ' · unavailable' : ''))); packs.append(label);
+    const packLabel = node('span', connector.label + (!enabled ? ' · unavailable' : ''));
+    label.append(input, packLabel); packs.append(label);
     const card = node('article', undefined, 'tool-step connector-card');
-    const heading = node('div', undefined, 'step-heading'); heading.append(node('h4', connector.label), node('span', enabled ? online ? 'PUBLIC SOURCE' : 'LOCAL TOOL' : 'UNAVAILABLE', 'step-status')); card.append(heading);
+    const heading = node('div', undefined, 'step-heading'), headingStatus = node('span', enabled ? online ? 'PUBLIC SOURCE' : 'LOCAL TOOL' : 'UNAVAILABLE', 'step-status'); heading.append(node('h4', connector.label), headingStatus); card.append(heading);
     card.append(node('p', connector.description || '', 'small'));
     const targets = connector.targets || connector.target_types;
     if (targets?.length) card.append(node('p', 'Targets: ' + targets.join(', '), 'small muted'));
     if (connector.domains?.length) card.append(node('p', 'Destinations: ' + connector.domains.join(', '), 'small muted'));
     if (connector.license) card.append(node('p', 'Licence: ' + connector.license, 'small muted'));
-    if (connectorReason(connector)) card.append(node('p', connectorReason(connector), enabled ? 'small' : 'step-error'));
+    const reason = node('p', connectorReason(connector), enabled ? 'small' : 'step-error'); reason.hidden = !connectorReason(connector); card.append(reason);
+    const readiness = node('div', undefined, 'source-readiness'); card.append(readiness);
     const run = node('button', 'Configure & run', 'secondary'); run.type = 'button'; run.dataset.connector = connector.id;
     run.disabled = !enabled || online && !status.network;
+    sourceReadinessElements.set(connector.id, {area: readiness, run, connector, headingStatus, packLabel, reason});
     action(run, () => openConnector(connector)); card.append(run); catalogue.append(card);
   }
   if (!connectors.length) catalogue.append(node('p', 'No source tools are installed.', 'small'));
   renderSearchService(result.search_service || {});
+  try { await refreshReadiness(); }
+  catch (_) { $('readiness-status').textContent = 'Local readiness could not be inspected. Refresh readiness to try again.'; }
+}
+function renderSourceReadiness(report) {
+  sourceReadiness = new Map((report?.sources || []).map(source => [source.id, source]));
+  for (const [id, {area, run, connector, headingStatus, packLabel, reason}] of sourceReadinessElements) {
+    area.replaceChildren();
+    const source = sourceReadiness.get(id), enabled = connectorReady(connector), online = connectorOnline(connector);
+    run.disabled = !enabled || online && !status.network;
+    headingStatus.textContent = enabled ? online ? 'PUBLIC SOURCE' : 'LOCAL TOOL' : (source?.state || 'unavailable').replaceAll('_', ' ').toUpperCase();
+    packLabel.textContent = connector.label + (!enabled ? ' · unavailable' : '');
+    reason.hidden = !!source || !connectorReason(connector);
+    if (!source) continue;
+    area.append(node('p', 'Local prerequisites: ' + (source.prerequisites_ready ? 'available' : 'needs setup'), 'small'));
+    if (source.network_required) area.append(node('p', 'Public collection: ' + (source.network_permitted ? 'permitted when requested' : 'disabled in this process'), 'small'));
+    if (source.message) area.append(node('p', source.message, 'small muted'));
+    const health = source.health || {};
+    if (health.checked_at) {
+      const observation = node('p', 'Last observed outcome: ' + (health.observed_state || health.state || 'unknown').replaceAll('_', ' '), 'small');
+      const time = node('time', health.checked_at); time.dateTime = health.checked_at; observation.append(node('span', ' · '), time); area.append(observation);
+      if (health.stale) area.append(node('p', 'This observation is stale; current source availability is unverified.', 'small muted'));
+    } else if (source.network_required) area.append(node('p', 'No source outcome recorded for this case.', 'small muted'));
+    if (health.retry_at && health.state === 'cooldown') area.append(node('p', 'Cooldown until ' + health.retry_at, 'small'));
+    if (health.message) area.append(node('p', health.message, 'small muted'));
+  }
+  updateConnectorControls();
+}
+function updateConnectorControls() {
+  for (const {run, connector} of sourceReadinessElements.values()) run.disabled = !connectorReady(connector) || connectorOnline(connector) && !status.network;
+  if (selectedConnector && $('connector-dialog').open) $('run-connector').disabled = connectorCase !== currentCase || !connectorInputReady || !connectorReady(selectedConnector) || connectorOnline(selectedConnector) && !status.network;
+}
+function renderReadiness(report) {
+  const area = $('readiness-components'); area.replaceChildren();
+  $('readiness-status').textContent = 'Local inspection at ' + report.checked_at + ' · Public collection ' + (report.network_permitted ? 'permitted when requested.' : 'disabled in this process.');
+  for (const component of report.components || []) {
+    const item = node('li'); item.append(node('strong', component.label + ': '), node('span', (component.state || 'unknown').replaceAll('_', ' ')));
+    if (component.tools) item.append(node('p', Object.entries(component.tools).map(([tool, present]) => tool + ': ' + (present ? 'installed' : 'missing')).join(' · '), 'small'));
+    const prerequisites = [['runtime_installed', 'Local model runtime'], ['model_available', 'Cached model'], ['docker_installed', 'Docker binary']]
+      .filter(([key]) => typeof component[key] === 'boolean').map(([key, label]) => label + ': ' + (component[key] ? 'available' : 'missing'));
+    if (prerequisites.length) item.append(node('p', prerequisites.join(' · '), 'small'));
+    if (component.runtime_state) item.append(node('p', 'Recorded runtime state: ' + component.runtime_state.replaceAll('_', ' '), 'small'));
+    if (component.message) item.append(node('p', component.message, 'small muted'));
+    area.append(item);
+  }
+  renderSourceReadiness(report);
+}
+async function refreshReadiness() {
+  const version = ++readinessVersion, caseId = currentCase;
+  if (readinessCase !== caseId) renderSourceReadiness(null);
+  const report = await api('/api/readiness' + (caseId ? '?' + new URLSearchParams({case: caseId}) : ''));
+  if (version !== readinessVersion || currentCase !== caseId || pageLeaving) return;
+  readinessCase = caseId;
+  renderReadiness(report);
 }
 function renderSearchService(service) {
   const state = service.state || 'stopped';
@@ -955,6 +1016,12 @@ async function refreshResearch(caseId = currentCase, loadSettings = false) {
     if (loadSettings || researchCase !== caseId) { setSourceSettings(workspace.settings || {}); researchCase = caseId; }
     renderResearch(workspace, caseId);
     if (workspace.search_service) renderSearchService(workspace.search_service);
+    const healthSignature = JSON.stringify(workspace.health || []);
+    if (readinessCase !== caseId || readinessHealthSignature !== healthSignature) {
+      readinessHealthSignature = healthSignature;
+      try { await refreshReadiness(); }
+      catch (_) { $('readiness-status').textContent = 'Local readiness could not be inspected. Refresh readiness to try again.'; }
+    }
   } finally {
     researchLoading = false;
     if (!pageLeaving && currentCase) researchTimer = setTimeout(() => refreshResearch(currentCase).catch(error => notice(error.message)), 2500);
@@ -985,7 +1052,8 @@ async function openConnector(connector, args = {}) {
     if (field.description) fields.append(node('p', field.description, 'small muted'));
   }
   $('connector-disclosure').textContent = !connectorOnline(connector) ? 'Processes saved evidence on this machine. No external request.' : 'Only the inputs shown here are sent to this source. Saved private identifiers are not included. A successful lookup does not establish identity.';
-  $('run-connector').disabled = !!savedEvidenceSelect || !connectorReady(connector) || connectorOnline(connector) && !status.network;
+  connectorInputReady = !savedEvidenceSelect;
+  $('run-connector').disabled = !connectorInputReady || !connectorReady(connector) || connectorOnline(connector) && !status.network;
   if (!$('connector-dialog').open) $('connector-dialog').showModal();
   fields.querySelector('input, select')?.focus();
   if (savedEvidenceSelect) {
@@ -1006,7 +1074,8 @@ async function openConnector(connector, args = {}) {
       for (const item of evidence) { const option = node('option', [item.title || 'Untitled source', item.source || item.format].filter(Boolean).join(' · ')); option.value = item.id; savedEvidenceSelect.append(option); }
       savedEvidenceSelect.value = evidence.some(item => item.id === args.evidence_id) ? args.evidence_id : '';
       savedEvidenceSelect.disabled = !evidence.length;
-      $('run-connector').disabled = !evidence.length || !connectorReady(connector);
+      connectorInputReady = !!evidence.length;
+      updateConnectorControls();
       fields.append(node('p', evidence.length ? 'Email (.eml) and plain-text originals appear first. Select a source by title; processing stays local and original bytes remain intact.' : 'Import an email (.eml) or paste its headers under Import a file or paste notes, then reopen this tool. Original message bytes stay on this machine.', 'small muted'));
       if (view.evidence?.length === view.limits?.evidence) fields.append(node('p', 'The newest 200 saved sources are listed. An earlier source remains selected when you edit one of its saved actions.', 'small muted'));
       if (evidence.length) savedEvidenceSelect.focus();
@@ -1048,12 +1117,14 @@ action($('refresh-diagnostics'), async () => {
   if (!list.childElementCount) list.append(node('li', 'No unexpected local failures recorded. Expected source blocks remain in tool activity.'));
   $('diagnostics-status').textContent = report.persistent === false ? 'Events are available for this session, but saving diagnostics failed. Check local disk permissions and space.' : 'Up to 100 metadata-only events are retained locally. No request contents or exception messages are stored.';
 });
+action($('refresh-readiness'), refreshReadiness);
 action($('close-connector'), () => $('connector-dialog').close());
 action($('relationship-candidate'), () => {
   if (relationshipWorkspace?.caseId === currentCase) renderRelationships(relationshipWorkspace.workspace, currentCase);
 }, 'change');
 action($('connector-form'), async () => {
   if (connectorCase !== currentCase || !selectedConnector) throw new Error('Select the source again for the current case.');
+  if (!connectorInputReady || !connectorReady(selectedConnector) || connectorOnline(selectedConnector) && !status.network) throw new Error('This source is unavailable. Inspect its readiness before running it.');
   const args = {};
   for (const input of document.querySelectorAll('[data-connector-field]')) args[input.dataset.connectorField] = input.type === 'number' ? Number(input.value) : input.value.trim();
   const caseId = currentCase;
