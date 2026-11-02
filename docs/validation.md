@@ -223,6 +223,14 @@ changed. The canonical app was reopened against the preserved workspace and the
 new source settings/workspace controls loaded successfully. No investigation of a
 real saved subject was started as part of qualification.
 
+Local storage update (2026-10-29): the schema-1 and schema-2 pre-upgrade databases
+are now retained losslessly in
+`.local-osint/backups/archives/migration-backups-20261029.tar.gz`. See
+[the local restore guide](../.local-osint/backups/RESTORE.md) and its adjacent
+`migration-backups-20261029.restore.json` for the original filenames, hashes,
+metadata and verified restore command. Restore the loose backup files before
+following the database rollback instructions in the README.
+
 Environment: macOS, Python 3.14.8, nginx 1.31.6 and the installed native llama.cpp.
 Other Python versions, Windows, other GGUF families and native SearXNG remain
 unqualified. The suite emits existing SQLite fixture `ResourceWarning` messages
