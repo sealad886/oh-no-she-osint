@@ -146,7 +146,7 @@ async function showEvidence(caseId, id) {
   if (currentCase !== caseId || detailVersion !== version) return;
   const area = detail(evidence.title);
   area.append(node('p', 'Source: ' + evidence.source, 'detail-meta'), node('p', 'Collected: ' + evidence.collected_at, 'detail-meta'), node('p', 'Original SHA-256: ' + evidence.sha256, 'detail-meta'));
-  const document = evidence.document;
+  const document = evidence.document, extraction = !document && evidence.extraction;
   if (document) {
     const pages = document.pages || [], extractionStatus = node('p', 'Local extraction: ' + (document.status || 'unknown') + ` · ${pages.length} page${pages.length === 1 ? '' : 's'}`, 'small');
     extractionStatus.setAttribute('role', 'status'); area.append(extractionStatus);
@@ -169,7 +169,19 @@ async function showEvidence(caseId, id) {
       area.append(pageDetails);
     }
   }
-  area.append(node('pre', typeof document?.text === 'string' ? document.text : evidence.text, 'evidence-text'), node('p', `${evidence.mentions?.length || 0} indicator mentions. Offsets refer to extracted text; original bytes are retained in the evidence export.`, 'small'));
+  if (extraction) {
+    const extractionStatus = node('p', 'Versioned source text: ' + (extraction.status || 'unknown'), 'small'); extractionStatus.setAttribute('role', 'status'); area.append(extractionStatus);
+    area.append(node('p', 'Text extractor: ' + extraction.extractor_version, 'detail-meta'));
+    if (extraction.text_sha256) area.append(node('p', 'Extracted text SHA-256: ' + extraction.text_sha256, 'detail-meta'));
+    if (extraction.evidence_sha256) area.append(node('p', 'Source original SHA-256: ' + extraction.evidence_sha256, 'detail-meta'));
+    for (const warning of extraction.warnings || []) area.append(node('p', String(warning), 'step-error'));
+    area.append(node('p', 'This text was extracted locally from the saved source response. Passage citations retain the extraction version and original evidence hash.', 'small muted'));
+  }
+  area.append(node('pre', typeof document?.text === 'string' ? document.text : typeof extraction?.text === 'string' ? extraction.text : evidence.text, 'evidence-text'));
+  if (extraction) {
+    const original = node('details'); original.append(node('summary', 'Saved source response'), node('pre', evidence.text, 'evidence-text')); area.append(original);
+  }
+  area.append(node('p', `${evidence.mentions?.length || 0} indicator mentions. ${extraction ? 'Indicator offsets refer to the saved source response; passage citations refer to versioned source text.' : 'Offsets refer to extracted text;'} Original bytes are retained in the evidence export.`, 'small'));
 }
 async function showEntity(caseId, id) {
   const version = ++detailVersion;

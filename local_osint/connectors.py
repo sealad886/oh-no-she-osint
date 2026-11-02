@@ -23,8 +23,11 @@ the public collector is saved before parsing, including HTTP failure bodies.
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+import base64
+import binascii
 import json
 import re
+import time
 from email import policy
 from email.parser import Parser
 from html.parser import HTMLParser
@@ -61,6 +64,8 @@ REGISTRY = {
     "commoncrawl": _meta("commoncrawl", "Common Crawl URL discovery", ["url"], ["index.commoncrawl.org"], "Find historical URLs for an approved public URL prefix. Index records are discovery leads, not retrieved page evidence.", max_requests=2, max_redirect_requests=6),
     "crossref": _meta("crossref", "Crossref publications", ["query"], ["api.crossref.org"], "Public publication metadata; enable when research is relevant."),
     "github_public": _meta("github_public", "GitHub public profile", ["username"], ["api.github.com"], "One approved public username. Account existence does not establish target identity."),
+    "github_repository": _meta("github_repository", "GitHub public repository", ["url"], ["api.github.com"], "Read one exact public repository and its README. No account, token, repository enumeration or download links.", max_requests=2, max_redirect_requests=6),
+    "github_issue": _meta("github_issue", "GitHub public issue", ["url"], ["api.github.com"], "Read one exact public issue and at most 30 comments from its first page. Authorship and target identity remain unconfirmed.", max_requests=2, max_redirect_requests=6),
     "public_profile": _meta("public_profile", "Public username profile", ["username", "site"], ["github.com", "gitlab.com"], "One selected public site per action; no account recovery or automatic ownership inference.", provenance=PROFILE_PROVENANCE, sites=list(PROFILE_SITES)),
     "website_sources": _meta("website_sources", "Website source discovery", ["url"], ["approved URL host"], "Discover same-host links, feeds, sitemaps and structured data from one public response."),
     "wayback": _meta("wayback", "Wayback public URL lookup", ["url"], ["archive.org"], "Check archived availability for an already approved public URL. Archived copies are not independent corroboration."),
@@ -101,6 +106,8 @@ def validate_arguments(connector_id, arguments):
         out[key] = value.strip()
     if "url" in out:
         out["url"] = public_url(out["url"], allow_query=True)[2]
+        if connector_id in {"github_repository", "github_issue"}:
+            out["url"] = github_url(connector_id, out["url"])[0]
     if "account" in out:
         account = out["account"].lstrip("@")
         if account.count("@") != 1:
@@ -119,6 +126,32 @@ def validate_arguments(connector_id, arguments):
     return out
 
 
+def github_url(connector_id, url):
+    """Parse only the two reviewed public GitHub resource shapes, without DNS."""
+    host, _, canonical = public_url(url)
+    parsed = urlsplit(canonical)
+    suffix = r"/issues/([1-9][0-9]{0,9})" if connector_id == "github_issue" else ""
+    match = re.fullmatch(r"/([A-Za-z0-9][A-Za-z0-9-]{0,38})/([A-Za-z0-9_.-]{1,100})" + suffix + r"/?", parsed.path)
+    if connector_id not in {"github_repository", "github_issue"} or host != "github.com" or not match:
+        raise InvalidInput("Use an exact public GitHub repository URL or its numbered issue URL.")
+    owner, repository = match.group(1, 2)
+    if owner.endswith('-') or '--' in owner or repository in {'.', '..'} or repository.lower().endswith('.git'):
+        raise InvalidInput("Use the canonical GitHub owner/repository URL without aliases or traversal.")
+    number = int(match.group(3)) if connector_id == "github_issue" else None
+    return canonical.rstrip('/'), owner + '/' + repository, number
+
+
+def github_connector(url):
+    """Return an eligible trusted source type for an exact public link."""
+    for connector in ("github_issue", "github_repository"):
+        try:
+            github_url(connector, url)
+            return connector
+        except (InvalidInput, TypeError):
+            pass
+    return None
+
+
 def _lead(url, title="", snippet="", **extra):
     try:
         canonical = public_url(url, allow_query=True)[2]
@@ -135,6 +168,181 @@ def _save_response(engine, case_id, connector_id, response):
         except (ValueError, UnicodeError):
             format = "text"
     return engine.ingest(case_id, raw, generated_title(REGISTRY[connector_id]["label"] + ": " + canonical), canonical, format)
+
+
+def _github_collect(engine, case_id, connector_id, args, result, settings):
+    """Fixed public REST reads; each derived passage stays tied to its JSON original."""
+    from .workspace import Workspace
+    canonical, repository, issue_number = github_url(connector_id, args['url'])
+    api = 'https://api.github.com/repos/' + repository
+    workspace = Workspace(engine)
+    result.update(parts=[], complete=False, partial=False)
+
+    def fetch(path, part):
+        try:
+            permitted = settings.get('can_request')
+            if permitted is not None and not permitted():
+                raise InvalidInput('Collection stopped before the next GitHub request; saved responses remain available.')
+            result['requests'] += 1
+            response = fetch_public_response(api + path, allow_query=True,
+                                             allowed_hosts={'api.github.com'}, accept='github')
+            saved = _save_response(engine, case_id, connector_id, response)
+            result['evidence_ids'].append(saved['id'])
+            result['bytes'] += len(response['raw'])
+            result['requests'] += response.get('requests', 1) - 1
+            result['http_status'] = response['status']
+            record = {'part': part, 'evidence_id': saved['id'], 'http_status': response['status']}
+            result['parts'].append(record)
+            try:
+                data = json.loads(response['raw'])
+            except (ValueError, UnicodeError, RecursionError):
+                data = None
+            status = response['status']
+            if status != 200:
+                message = data.get('message', '') if isinstance(data, dict) else ''
+                rate = status == 429 or status == 403 and (
+                    response.get('rate_limit_remaining') == 0 or response.get('retry_after') is not None or
+                    isinstance(message, str) and ('rate limit' in message.lower() or 'secondary rate' in message.lower()))
+                outcome = 'rate_limited' if rate else 'empty' if status in {404, 410} else 'blocked' if status in {401, 403, 999} else 'error'
+                retry = response.get('retry_after')
+                if rate and response.get('rate_limit_remaining') == 0 and response.get('rate_limit_reset') is not None:
+                    retry = max(retry or 0, min(86400, max(0, response['rate_limit_reset'] - int(time.time()))))
+                record['status'] = outcome
+                result.update(status=outcome, retry_after=retry,
+                              summary='GitHub ' + part + ' returned HTTP ' + str(status) + '; original response retained. Public unavailability does not establish nonexistence.')
+                return None
+            if data is None:
+                raise ValueError('Uninterpretable JSON')
+            record['status'] = 'success'
+            return data, saved['id']
+        except InvalidInput as exc:
+            result.update(status='error', summary=str(exc))
+        except (ValueError, TypeError, KeyError, UnicodeError, RecursionError):
+            result.update(status='uninterpretable', summary='GitHub response retained, but the expected public record could not be interpreted.')
+            if result['parts']:
+                result['parts'][-1]['status'] = 'uninterpretable'
+        return None
+
+    def text(value, *, nullable=False):
+        if nullable and value is None:
+            return ''
+        if not isinstance(value, str) or '\x00' in value:
+            raise ValueError('Expected bounded source text')
+        return value
+
+    def author(value):
+        if value is None:
+            return '[deleted account]'
+        login = value.get('login') if isinstance(value, dict) else None
+        if not isinstance(login, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9-]{0,38}(?:\[bot\])?', login):
+            raise ValueError('Missing source author')
+        return login
+
+    def extract(evidence_id, rendered, passages, warnings=None):
+        version = 'github-public-json-v1'
+        artifact = workspace.record_extraction(case_id, evidence_id, rendered, version,
+                                               warnings=warnings or [], status='limited' if warnings else 'ready')
+        for passage in passages:
+            kind, value, start, *context = passage
+            if value.strip():
+                quote = value[:1000]
+                result['observations'].append({'kind': kind, 'value': (context[0] + ': ' if context else '') + quote, 'quote': quote,
+                    'start': start, 'extractor_version': version, 'extraction_id': artifact['id'],
+                    'evidence_id': evidence_id, 'status': 'unverified', 'ownership': 'unconfirmed'})
+
+    try:
+        primary = fetch('' if issue_number is None else '/issues/' + str(issue_number),
+                        'repository' if issue_number is None else 'issue')
+        if primary is None:
+            return result
+        data, evidence_id = primary
+        if not isinstance(data, dict) or type(data.get('id')) is not int or data['id'] <= 0:
+            raise ValueError('Missing source identity')
+        if issue_number is None:
+            if data.get('private') is not False or str(data.get('full_name', '')).lower() != repository.lower():
+                raise ValueError('Repository did not match the public request')
+            if github_url('github_repository', data.get('html_url', ''))[0].lower() != canonical.lower():
+                raise ValueError('Repository URL mismatch')
+            description = text(data.get('description'), nullable=True)
+            rendered = 'Repository: ' + data['full_name'] + '\nSource: ' + canonical + '\n\n' + description
+            extract(evidence_id, rendered, [('github_repository_description', description, len(rendered) - len(description))])
+            result['repository'] = {'full_name': data['full_name'], 'ownership': 'unconfirmed'}
+            result['leads'] = [_lead(canonical, data['full_name'], description)]
+            result['status'] = 'success'
+            readme = fetch('/readme', 'README')
+            if readme is None:
+                result['partial'] = True
+                result['summary'] += ' Repository metadata remains available; README collection is incomplete.'
+                return result
+            item, readme_id = readme
+            if not isinstance(item, dict) or item.get('type') != 'file' or item.get('encoding') != 'base64':
+                raise ValueError('Expected encoded README file')
+            content = text(item.get('content'))
+            raw = base64.b64decode(''.join(content.split()), validate=True)
+            if type(item.get('size')) is not int or item['size'] != len(raw) or len(raw) > 2097152:
+                raise ValueError('README size mismatch')
+            body = raw.decode('utf-8-sig')
+            if '\x00' in body or not re.fullmatch(r'[a-fA-F0-9]{40,64}', str(item.get('sha', ''))):
+                raise ValueError('Invalid README content')
+            path = text(item.get('path'))
+            if not path or len(path) > 1000 or any(ord(c) < 32 for c in path):
+                raise ValueError('Invalid README path')
+            header = 'Repository: ' + repository + '\nREADME path: ' + path + '\nGit blob: ' + item['sha'] + '\n\n'
+            extract(readme_id, header + body, [('github_readme_passage', body, len(header))])
+            result.update(complete=True, summary='Public repository metadata and README retained with versioned text; ownership and source assertions remain unconfirmed.')
+        else:
+            if type(data.get('number')) is not int or data['number'] != issue_number or data.get('repository_url', '').lower() != api.lower() or 'pull_request' in data:
+                raise ValueError('Not the requested issue; pull request collection is outside this action')
+            if github_url('github_issue', data.get('html_url', ''))[0].lower() != canonical.lower():
+                raise ValueError('Issue URL mismatch')
+            title, body = text(data.get('title')), text(data.get('body'), nullable=True)
+            login = author(data.get('user'))
+            count = data.get('comments')
+            if type(count) is not int or count < 0:
+                raise ValueError('Invalid comment count')
+            header = 'Issue: ' + canonical + '\nTitle: ' + title + '\nAuthor account: ' + login + '\nCreated: ' + text(data.get('created_at')) + '\n\n'
+            extract(evidence_id, header + body, [('github_issue_body', body, len(header))])
+            result.update(status='success', issue={'number': issue_number, 'author': login, 'ownership': 'unconfirmed'},
+                          comments={'reported': count, 'captured': 0, 'limit': 30, 'complete': count == 0})
+            result['leads'] = [_lead(canonical, title, body)]
+            if count:
+                comments = fetch('/issues/' + str(issue_number) + '/comments?per_page=30&page=1', 'comments')
+                if comments is None:
+                    result['partial'] = True
+                    result['summary'] += ' Issue body remains available; comments are incomplete.'
+                    return result
+                records, comments_id = comments
+                if not isinstance(records, list) or len(records) > 30:
+                    raise ValueError('Unexpected comments page')
+                rendered, passages, authors, seen = '', [], [], set()
+                for comment in records:
+                    if not isinstance(comment, dict) or type(comment.get('id')) is not int or comment['id'] <= 0 or comment['id'] in seen:
+                        raise ValueError('Invalid comment identity')
+                    seen.add(comment['id'])
+                    if comment.get('issue_url', '').lower() != (api + '/issues/' + str(issue_number)).lower():
+                        raise ValueError('Comment belongs to a different issue')
+                    login, body = author(comment.get('user')), text(comment.get('body'), nullable=True)
+                    header = 'Comment ID: ' + str(comment['id']) + '\nAuthor account: ' + login + '\nCreated: ' + text(comment.get('created_at')) + '\n\n'
+                    start = len(rendered) + len(header)
+                    rendered += header + body + '\n\n'
+                    passages.append(('github_issue_comment', body, start, 'Comment ' + str(comment['id']) + ' by ' + login))
+                    authors.append({'id': comment['id'], 'author': login, 'ownership': 'unconfirmed'})
+                complete = len(records) == count and count < 30
+                warning = [] if complete else ['Only the first comments page was collected; discussion completeness is unverified.']
+                extract(comments_id, rendered, passages, warnings=warning)
+                result['comments'].update(captured=len(records), complete=complete, authors=authors)
+                result['partial'] = not complete
+            captured = result['comments']['captured']
+            result.update(complete=result['comments']['complete'],
+                          summary='Public issue body retained; captured ' + str(captured) + ' of ' + str(count) +
+                          ' reported comments' + ('.' if result['comments']['complete'] else ' from the first page only; discussion is incomplete.') +
+                          ' Separate author labels and versioned passages remain unconfirmed source assertions.')
+    except (InvalidInput, ValueError, TypeError, KeyError, UnicodeError, AttributeError, binascii.Error):
+        result.update(status='uninterpretable', partial=bool(result['observations']), complete=False,
+                      summary='GitHub originals retained, but the expected matching public content could not be interpreted. Previously parsed passages remain available.')
+        if result['parts']:
+            result['parts'][-1]['status'] = 'uninterpretable'
+    return result
 
 
 class SourceLinks(HTMLParser):
@@ -270,6 +478,8 @@ def execute(engine, case_id, connector_id, arguments, enabled=False, settings=No
         return result
     if not enabled:
         raise InvalidInput("Web collection is off. Enable public network collection to run this source.")
+    if connector_id in {"github_repository", "github_issue"}:
+        return _github_collect(engine, case_id, connector_id, args, result, settings)
     if connector_id == "searxng":
         manager = settings.get("search_service")
         if manager is None:

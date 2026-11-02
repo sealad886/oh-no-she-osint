@@ -466,6 +466,27 @@ test('document evidence exposes extraction status and pages and retries only loc
   assert.equal(ui.requests.some(item => item.url === '/api/action' || item.url === '/api/investigate'), false);
 });
 
+test('API evidence exposes readable versioned text and its saved response without native document actions', async () => {
+  const text = 'Comment #123\nAuthor: public-author\nFirst line\nSecond line <img src=x onerror=alert(1)>';
+  const raw = JSON.stringify({id:123,user:{login:'public-author'},body:'First line\nSecond line <img src=x onerror=alert(1)>'});
+  const warning = 'Only the first 30 comments were collected.';
+  const ui = harness({evidence:{id:'issue-comments',title:'Public issue comments',source:'https://api.github.com/repos/public/repository/issues/1/comments?per_page=30&page=1',format:'json',collected_at:'2026-11-02T12:00:00Z',sha256:'original-response-hash',text:raw,mentions:[{start:1,end:5}],extraction:{id:'extraction-a',extractor_version:'github-comments-v1',text,text_sha256:'extracted-text-hash',evidence_sha256:'original-response-hash',status:'limited',warnings:[warning],pages:[]}}});
+  await new Promise(resolve => setImmediate(resolve));
+  const before = ui.requests.length;
+  await ui.run("currentCase='case-a'; showEvidence('case-a','issue-comments')");
+  const details = ui.elements.get('detail-content'), contents = ui.walk(details);
+  const renderedText = contents.filter(element => element.tagName === 'PRE').map(element => element.textContent);
+  assert.ok(renderedText.includes(text));
+  assert.ok(renderedText.includes(raw));
+  assert.match(details.textContent, /github-comments-v1/);
+  assert.match(details.textContent, /extracted-text-hash/);
+  assert.match(details.textContent, /original-response-hash/);
+  assert.ok(details.textContent.includes(warning));
+  assert.equal(contents.some(element => element.tagName === 'IMG'), false);
+  assert.equal(contents.some(element => element.dataset.documentReextract), false);
+  assert.deepEqual(ui.requests.slice(before), [{url:'/api/evidence?case=case-a&id=issue-comments',body:null}]);
+});
+
 test('document claims expose cited page numbers with the exact original evidence reference', async () => {
   const ui = harness(); await new Promise(resolve => setImmediate(resolve));
   ui.run(`currentCase='case-a'; renderResearch({tasks:[],candidates:[],claims:[{id:'claim-a',predicate:'public statement',value:'A quoted observation',status:'unconfirmed',references:[{evidence_id:'document-a',quote:'Exact text',extractor_version:'documents-v1',start:10,end:20,pages:[{page:2,start:0,end:200},{page:3,start:200,end:400}],relation:'support'}]}],counts:{}},'case-a')`);

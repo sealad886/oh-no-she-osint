@@ -7,6 +7,7 @@ source text and configurable prompts cannot create new permissions.
 from datetime import datetime, timedelta, timezone
 import json
 import re
+import time
 from urllib.parse import urlsplit, unquote_plus
 
 from .engine import InvalidInput, field, now
@@ -64,7 +65,7 @@ class Frontier:
         clues = outbound_private_clues(self.runner.case, self.runner.options)
         if connector in {'public_profile', 'github_public'} and arguments.get('username') in self.runner.options['public_usernames']:
             clues = [clue for clue in clues if clue.casefold() != arguments['username'].casefold()]
-        if connector in {'collect_page', 'website_sources', 'wayback'} and arguments.get('url') in self.runner.options['seed_urls']:
+        if connector in {'collect_page', 'website_sources', 'wayback', 'github_repository', 'github_issue'} and arguments.get('url') in self.runner.options['seed_urls']:
             clues = [clue for clue in clues if clue.casefold() != arguments['url'].casefold()]
         # Public links can encode private contacts in their path or query. Check
         # the transport representation and bounded decoded forms before dispatch.
@@ -121,9 +122,72 @@ class Frontier:
         if connector in {'github_public', 'public_profile'} and not explicit:
             if checked.get('username') not in self.runner.options['public_usernames']:
                 raise InvalidInput('Approve this public username in source settings before checking other sites.')
+        if connector in {'github_repository', 'github_issue'} and not explicit:
+            from .connectors import github_url
+            seeds = set()
+            for seed in self.runner.options['seed_urls']:
+                try:
+                    seeds.add(github_url(connector, seed)[0])
+                except InvalidInput:
+                    pass
+            if checked['url'] not in seeds and not self._github_source(source_id, checked['url']):
+                raise InvalidInput('GitHub collection requires an exact public starting URL or a recorded public source reference.')
         return checked
 
+    def _github_source(self, source_id, url):
+        """Local imports and generated reports cannot grant new collection scope."""
+        if not source_id:
+            return False
+        from .collector import public_url
+        from .connectors import REGISTRY
+        evidence = self.runner.engine.evidence(self.case_id, source_id)
+        try:
+            public_url(evidence['source'], allow_query=True)
+        except InvalidInput:
+            return False
+        remote = {'collect_page', 'web_search', 'news_search', 'search_subject', 'domain_signals'} | {
+            key for key, item in REGISTRY.items() if item['max_requests'] > 0}
+        receipts = [task for task in self.workspace.tasks(self.case_id) if source_id in task['evidence_ids'] and
+                    task['connector'] in remote and not (task.get('result') or {}).get('historical_report_id')]
+        recorded = bool(receipts)
+        recorded = recorded or any(page.get('source_id') == source_id for page in self.runner.report.get('pages', []))
+        text = (evidence.get('extraction') or {}).get('text', evidence['text'])
+        saved_lead = any(lead.get('url') == url for task in receipts for lead in (task.get('result') or {}).get('leads', []) if isinstance(lead, dict))
+        return recorded and (url in text or url in self.runner.allowed_urls or saved_lead)
+
+    def _github_follow(self, url, source_id=None, *, priority=10):
+        from .connectors import github_connector, github_url
+        connector = github_connector(url)
+        if connector not in self.runner.options['packs']:
+            return False
+        canonical = github_url(connector, url)[0]
+        # A new discovery origin does not authorize automatic refetching of the
+        # same resource. Explicit Retry still creates another attempt normally.
+        if any(task['connector'] == connector and task['arguments'].get('url') == canonical
+               for task in self.workspace.tasks(self.case_id)):
+            return True
+        try:
+            self.enqueue(connector, {'url': canonical}, 'Read an exact approved or source-backed public GitHub resource.',
+                         source_id=source_id, priority=priority)
+        except InvalidInput:
+            return False
+        return True
+
     def enqueue(self, connector, arguments, reason, explicit=False, source_id=None, candidate_id=None, priority=0):
+        if connector == 'collect_page' and not explicit:
+            from .connectors import github_connector
+            github = github_connector(arguments.get('url')) if isinstance(arguments, dict) else None
+            if github in self.runner.options['packs']:
+                try:
+                    checked = self.guard(github, arguments, source_id=source_id)
+                except InvalidInput:
+                    pass
+                else:
+                    existing = next((task for task in self.workspace.tasks(self.case_id)
+                                     if task['connector'] == github and task['arguments'] == checked), None)
+                    if existing:
+                        return existing
+                    connector = github
         checked = self.guard(connector, arguments, explicit, source_id)
         task = self.workspace.enqueue(self.case_id, connector, checked, reason=reason,
             source_id=source_id, candidate_id=candidate_id, priority=priority)
@@ -139,7 +203,8 @@ class Frontier:
         r = self.runner
         for url in r.options['seed_urls']:
             r.allowed_urls.add(url)
-            self.enqueue('collect_page', {'url': url}, 'Read the public starting URL supplied for this case.', priority=20)
+            if not self._github_follow(url, priority=20):
+                self.enqueue('collect_page', {'url': url}, 'Read the public starting URL supplied for this case.', priority=20)
         for connector in r.options['packs']:
             if connector in {'crossref', 'searxng'}:
                 query = r.options['query'] + (' ' + r.options['context'] if r.options['context'] else '')
@@ -192,6 +257,11 @@ class Frontier:
             r.step('Local AI: extract source observations with exact passages', extract, 0, 'analyze', {})
         if page.get('context_excluded') or not page.get('useful'):
             return
+        for link in page.get('links', []):
+            try:
+                self._github_follow(link['url'], evidence['id'])
+            except InvalidInput:
+                continue
         if 'website_sources' in r.options['packs']:
             self.enqueue('website_sources', {'url': evidence['source']},
                 'Discover first-party feeds, documents and relevant links from this public source.', source_id=evidence['id'])
@@ -207,7 +277,8 @@ class Frontier:
             url = lead['url']
             if url not in attempted:
                 r.allowed_urls.add(url)
-                self.enqueue('collect_page', {'url': url}, 'Read a relevant public search result.', source_id=lead.get('source_id'), priority=10)
+                if not self._github_follow(url, lead.get('source_id')):
+                    self.enqueue('collect_page', {'url': url}, 'Read a relevant public search result.', source_id=lead.get('source_id'), priority=10)
             elif 'wayback' in r.options['packs'] and not lead.get('page_source_id'):
                 self.enqueue('wayback', {'url': url}, 'Look for an existing public archive after an unsuccessful live-page attempt.', source_id=lead.get('source_id'))
 
@@ -302,21 +373,22 @@ class Frontier:
         return {'summary': str(count) + ' source actions processed; saved evidence and remaining actions retained.'}
 
     def execute(self, task, arguments):
-        from .connectors import execute
+        from .connectors import REGISTRY, execute
         r = self.runner
         connector = task['connector']
         outcome = None
         def collect():
             nonlocal outcome
             outcome = execute(r.engine, self.case_id, connector, arguments, enabled=r.enabled,
-                              settings={'search_service': r.search_service})
+                              settings={'search_service': r.search_service,
+                                        'can_request': lambda: not r.cancel.is_set() and time.monotonic() < r.deadline})
             for source_id in outcome.get('evidence_ids', []):
                 r.remember({'id': source_id})
             return {'summary': outcome.get('summary', ''), '_action_status': outcome['status'],
                     '_outcome': outcome, '_evidence_ids': outcome.get('evidence_ids', []),
                     **({'id': outcome['evidence_ids'][0]} if outcome.get('evidence_ids') else {})}
         result = r.step('Source tool: ' + connector, collect, tool=connector, arguments=arguments,
-                        cost=0 if connector == 'email_headers' else 2 if connector == 'commoncrawl' else 1)
+                        cost=REGISTRY[connector]['max_requests'])
         if outcome and outcome['status'] in {'rate_limited', 'blocked', 'uninterpretable', 'error'}:
             saved = next(x for x in self.workspace.tasks(self.case_id) if x['id'] == task['id'])
             self.workspace.update_health(self.case_id, connector, outcome['status'],
@@ -331,14 +403,19 @@ class Frontier:
             if not source_id or not isinstance(quote, str) or not quote:
                 continue
             evidence = r.engine.evidence(self.case_id, source_id)
-            if evidence['text'].count(quote) != 1:
+            text = (evidence.get('extraction') or {}).get('text', evidence['text'])
+            start = observation.get('start')
+            if start is not None and (type(start) is not int or start < 0 or text[start:start + len(quote)] != quote):
+                continue
+            if start is None and text.count(quote) != 1:
                 continue
             candidate = self.workspace.candidate(self.case_id,
                 field(arguments.get('username') or r.case['name'], 'Candidate', 200),
                 context=connector + ': ' + evidence['source'], source_id=source_id)
             self.workspace.observe(self.case_id, source_id, candidate['id'], quote,
                 predicate=str(observation.get('kind', 'observation'))[:100],
-                value=str(observation.get('value', ''))[:2000])
+                value=str(observation.get('value', ''))[:2000], start=start,
+                **({'extractor_version': observation['extractor_version']} if observation.get('extractor_version') else {}))
         from .planner import rank_links
         for item in rank_links(outcome.get('leads', []), r.case, r.options)[:10]:
             url = item.get('url')
@@ -348,6 +425,8 @@ class Frontier:
                 continue
             try:
                 r.allowed_urls.add(url)
+                if self._github_follow(url, (outcome.get('evidence_ids') or [None])[0]):
+                    continue
                 follow = 'public_actor' if connector == 'webfinger' and item.get('connector') == 'public_actor' else 'collect_page'
                 self.enqueue(follow, {'url': url}, 'Follow a public lead returned by ' + connector + '.',
                     source_id=(outcome.get('evidence_ids') or [None])[0], candidate_id=task.get('candidate_id'), priority=10)

@@ -1,6 +1,6 @@
 # Source definitions, optional software and attribution
 
-Updated 2026-10-16. The application's own code is covered by the repository
+Updated 2026-11-02. The application's own code is covered by the repository
 [MIT licence](../LICENSE). Public websites, provider APIs, downloaded models,
 optional runtimes and upstream data keep their own terms. This notice does not
 relicense collected evidence or promise permission for every intended use.
@@ -71,7 +71,7 @@ licence grants over returned content:
 | Provider | Interface or provenance |
 | --- | --- |
 | Crossref | [REST metadata API](https://www.crossref.org/documentation/retrieve-metadata/rest-api/) |
-| GitHub | [Public user REST API](https://docs.github.com/en/rest/users/users#get-a-user) |
+| GitHub | [Public user REST API](https://docs.github.com/en/rest/users/users#get-a-user), [repository metadata](https://docs.github.com/en/rest/repos/repos#get-a-repository), [preferred README](https://docs.github.com/en/rest/repos/contents#get-a-repository-readme), [issue body](https://docs.github.com/en/rest/issues/issues#get-an-issue) and [issue comments](https://docs.github.com/en/rest/issues/comments#list-issue-comments); unauthenticated public resources only |
 | GitHub / GitLab public pages | Selected Sherlock-derived URLs, subject to each site's access rules |
 | Internet Archive | [Wayback availability API](https://archive.org/help/wayback_api.php) |
 | Common Crawl | [CDX URL index](https://index.commoncrawl.org/); bounded index catalogue/capture metadata only, no bundled WARC data |

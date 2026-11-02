@@ -127,6 +127,8 @@ scope checks, collection limits and attempt history.
 | Website source discovery | Public HTTPS URL | Same-host links, feeds, sitemap references and structured source metadata; eligible leads enter the queue |
 | Crossref publications | Public query | Publication metadata and DOI links; the automatic recipe adds it for research/academic context |
 | GitHub public profile | Public username | Public API account metadata; ownership by the target remains unconfirmed |
+| GitHub public repository | Exact public repository URL | Repository metadata and preferred README; original API responses and versioned text remain saved |
+| GitHub public issue | Exact public issue URL | Issue body and up to 30 comments from the first page; authorship remains separate and collection limits stay visible |
 | Public username profile | Username and GitHub/GitLab site | Requires matching account metadata; generic HTTP 200 responses, login screens and challenges are insufficient |
 | Wayback public URL lookup | Public URL | Existing archive availability with original URL and capture date |
 | Public place references | Public locality query | GeoNames references; no private-address or automatic Nominatim lookup |
@@ -143,6 +145,21 @@ it is not cross-instance username enumeration. A manually configured source acti
 authorizes its exact input, not wider collection. Public starting URLs remain
 separate from private case clues. Automatic sources and links are revalidated at
 dispatch against network permission, public URL scope and private-clue guards.
+
+GitHub repository and issue tools accept `https://github.com/OWNER/REPO` and
+`https://github.com/OWNER/REPO/issues/NUMBER`. Remove query parameters, fragments,
+encoded path characters and `.git` suffixes. They use unauthenticated public REST
+endpoints; a private or unavailable resource does not trigger a login attempt.
+Each action reserves two collection units for its bounded requests. A repository
+action reads metadata and its preferred README. An issue action reads the body
+and at most the first 30 comments; it never walks further pages or crawls the
+repository. Missing, blocked, rate-limited or incomplete content remains visible.
+
+The evidence viewer separates decoded README/discussion text from its saved API
+response. Citations retain the versioned text and original-response hash; JSON
+export includes both. Repository ownership, issue authors and comment authors are
+source assertions, not verified links to the investigation target. Pull request
+URLs and issue responses representing pull requests are outside this action.
 
 **Run a tool** also retains individual web/news/encyclopedia searches, public-page
 collection, domain signals and saved-evidence reads. No extra shell tool server

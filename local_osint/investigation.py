@@ -267,9 +267,12 @@ class Investigation:
             if task:
                 action_status = (result or {}).get('_action_status')
                 retry = None
-                if retryable and (tool in RECOVERABLE_SEARCH_CONNECTORS or action_status == 'rate_limited') and task['attempts'] < AUTOMATIC_ATTEMPT_LIMIT:
+                if retryable and (action_status == 'rate_limited' or tool in RECOVERABLE_SEARCH_CONNECTORS and task['attempts'] < AUTOMATIC_ATTEMPT_LIMIT):
                     from datetime import datetime, timedelta, timezone
                     delay = retry_delay_seconds(entry.get('error'), rate_limited=action_status == 'rate_limited')
+                    hint = ((result or {}).get('_outcome') or {}).get('retry_after')
+                    if action_status == 'rate_limited' and type(hint) is int and hint >= 0:
+                        delay = max(delay, min(hint, 86400))
                     retry = (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()
                 finished_state = ('cooldown' if retry else 'blocked' if action_status in {'blocked', 'uninterpretable'} else
                     'complete' if entry.get('ok') else 'interrupted_after_dispatch' if entry['status'] == 'cancelled' else 'failed')
@@ -756,7 +759,7 @@ class Investigation:
             except (InvalidInput, ValueError):
                 continue
         for url in self.options['seed_urls'][:2]:
-            if self.page_count() < self.options['page_limit']:
+            if not frontier._github_follow(url) and self.page_count() < self.options['page_limit']:
                 self.page(url)
         domain = next(iter(known_domains), None) or next(iter(sorted(self.allowed_domains)), None)
         if 'domain' in selected and domain:
@@ -774,17 +777,23 @@ class Investigation:
             self.analyze()
 
     def follow_candidates(self, goal):
+        from .frontier import Frontier
+        frontier = Frontier(self)
         for lead in sorted(self.report['web_results'], key=rank_key, reverse=True):
             if self.page_count() >= goal:
                 return
             match = lead.get('local_match', {})
             if lead.get('relevant') and lead['url'] not in self.pages and (match.get('level') == 'identifier_match' or match.get('model_assessment') != 'context_unlikely'):
+                if frontier._github_follow(lead['url'], lead.get('source_id')):
+                    continue
                 self.page(lead['url'])
                 for link in next((p['links'] for p in self.report['pages'] if p['url'] == lead['url'] and p.get('useful')), [])[:2]:
                     if self.page_count() >= goal:
                         return
                     if link['url'] not in self.pages:
-                        self.page(link['url'])
+                        page = next(p for p in self.report['pages'] if p['url'] == lead['url'])
+                        if not frontier._github_follow(link['url'], page['source_id']):
+                            self.page(link['url'])
 
     def continuation_hosts(self):
         """Avoid access barriers across a host, without bypassing them."""

@@ -1,6 +1,6 @@
 # Local OSINT engine: scope and design
 
-Canonical architecture, updated 2026-10-16. Historical implementation/validation
+Canonical architecture, updated 2026-11-02. Historical implementation/validation
 receipts remain in [validation.md](validation.md); their older limits are not the
 current configuration contract.
 
@@ -77,6 +77,24 @@ time and cooldown deadline; neither an installed tool nor a previous success
 establishes current provider availability. Readiness inspection performs no
 public requests, service startup or installation. Normal explicit source actions
 produce the recorded health evidence through the existing dispatcher.
+
+Public GitHub repository and issue adapters accept exact canonical public URLs
+and construct fixed `api.github.com` REST endpoints. Repository collection reads
+metadata and the preferred README; issue collection reads the issue body and at
+most 30 comments from the first page. Each action reserves two collection units;
+pagination, returned download URLs and repository-wide crawling are not followed.
+The adapters use the shared pinned HTTPS transport without credentials and the
+fixed GitHub REST API version `2026-03-10`. Their
+raw response originals are saved before status or content interpretation.
+
+Decoded README and discussion text is a versioned extraction of the corresponding
+API original. Exact passage references retain that extraction and original hash;
+the viewer exposes both readable text and the saved response. Comment IDs,
+authors and dates remain distinct source metadata. Empty, unavailable,
+rate-limited, malformed and partial collection outcomes do not establish absence,
+target identity or independent corroboration. Automatic follow-ups remain subject
+to enabled packs, exact public seed/source-backed URLs and the frontier's scope
+and private-clue checks.
 
 Case source settings are:
 

@@ -152,6 +152,8 @@ class QuestionStorageTests(unittest.TestCase):
         source = self.engine.ingest(self.case, text.encode(), "Long programme", "https://example.org/programme")["id"]
         pages = [{"page": 1, "start": 0, "end": len(prefix), "method": "text"}, {"page": 18, "start": len(prefix), "end": len(text), "method": "ocr"}]
         before = self.engine.evidence(self.case, source)
+        with self.engine.connection() as db:
+            original = tuple(db.execute("SELECT id,case_id,title,source,format,collected_at,sha256,raw,text FROM evidence WHERE id=?", (source,)).fetchone())
         self.workspace.record_extraction(self.case, source, text, "pdf-v1", pages)
         claim = self.workspace.observe(self.case, source, self.candidate, "Ada Example attended Harbour Symposium.", "event", "Harbour Symposium")
         reference = claim["references"][0]
@@ -160,11 +162,26 @@ class QuestionStorageTests(unittest.TestCase):
         retrieved = self.workspace.retrieve(self.case, "Symposium")[0]
         self.assertIn(18, [page["page"] for page in retrieved["pages"]])
         self.assertIn("Harbour Symposium", retrieved["text"])
-        self.assertEqual(self.engine.evidence(self.case, source), before)
+        after = self.engine.evidence(self.case, source)
+        for key in ('id', 'title', 'source', 'format', 'collected_at', 'sha256', 'text', 'mentions'):
+            self.assertEqual(after[key], before[key])
+        self.assertEqual(after['extraction']['extractor_version'], 'pdf-v1')
+        self.assertEqual(after['extraction']['text'], text)
+        self.assertEqual(after['extraction']['evidence_sha256'], before['sha256'])
+        with self.engine.connection() as db:
+            self.assertEqual(tuple(db.execute("SELECT id,case_id,title,source,format,collected_at,sha256,raw,text FROM evidence WHERE id=?", (source,)).fetchone()), original)
         revised = "OCR corrected late signal: Harbour Symposium speaker."
         self.workspace.record_extraction(self.case, source, revised, "pdf-ocr-v2", [{"page": 18, "start": 0, "end": len(revised), "method": "ocr"}])
         self.assertEqual(self.workspace.retrieve(self.case, "corrected")[0]["text"], revised)
-        self.assertEqual(self.engine.evidence(self.case, source), before)
+        after = self.engine.evidence(self.case, source)
+        for key in ('id', 'title', 'source', 'format', 'collected_at', 'sha256', 'text', 'mentions'):
+            self.assertEqual(after[key], before[key])
+        self.assertEqual(after['extraction']['extractor_version'], 'pdf-ocr-v2')
+        self.assertEqual(after['extraction']['text'], revised)
+        self.assertEqual(after['extraction']['text_sha256'], hashlib.sha256(revised.encode()).hexdigest())
+        self.assertEqual(after['extraction']['evidence_sha256'], before['sha256'])
+        with self.engine.connection() as db:
+            self.assertEqual(tuple(db.execute("SELECT id,case_id,title,source,format,collected_at,sha256,raw,text FROM evidence WHERE id=?", (source,)).fetchone()), original)
         exported = self.engine.export(self.case)
         versions = {item['extractor_version']: item for item in exported['extractions'] if item['evidence_id'] == source}
         self.assertEqual(versions['pdf-v1']['text'], text)

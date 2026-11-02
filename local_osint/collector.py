@@ -19,6 +19,7 @@ SEARCH_PROVIDERS = {"duckduckgo": "DuckDuckGo", "bing": "Bing"}
 ACCEPT_PROFILES = {
     "default": "text/html, text/plain, application/json, application/jrd+json, application/activity+json, application/pdf, application/xml, text/csv",
     "activitypub": 'application/activity+json, application/ld+json; profile="https://www.w3.org/ns/activitystreams", application/json;q=0.9',
+    "github": "application/vnd.github+json",
 }
 
 
@@ -146,7 +147,10 @@ def _fetch_public(url, allow_query=False, structured=False, allowed_hosts=None, 
         connection = PinnedHTTPS(host, address)
         connection.timeout = min(10, max(0.001, deadline - time.monotonic()))
         try:
-            connection.request("GET", path, headers={"User-Agent": "LocalOSINT/0.1 (public evidence collection)", "Accept": ACCEPT_PROFILES[accept], "Accept-Encoding": "identity"})
+            headers = {"User-Agent": "LocalOSINT/0.1 (public evidence collection)", "Accept": ACCEPT_PROFILES[accept], "Accept-Encoding": "identity"}
+            if accept == 'github':
+                headers['X-GitHub-Api-Version'] = '2026-03-10'
+            connection.request("GET", path, headers=headers)
             response = connection.getresponse()
             if response.status in {301, 302, 303, 307, 308}:
                 location = response.getheader("Location")
@@ -162,8 +166,14 @@ def _fetch_public(url, allow_query=False, structured=False, allowed_hosts=None, 
                 raw, format, canonical = read_public_response(response, connection, canonical, deadline, permit_status=True, permit_xml=True)
                 retry_after = response.getheader('Retry-After', '')
                 retry_after = min(int(retry_after), 86400) if str(retry_after).isdecimal() else None
-                return {"raw": raw, "format": format, "canonical": canonical,
-                        "status": response.status, "retry_after": retry_after, "requests": hop + 1}
+                result = {"raw": raw, "format": format, "canonical": canonical,
+                          "status": response.status, "retry_after": retry_after, "requests": hop + 1}
+                if accept == 'github':
+                    for header, key in [('X-RateLimit-Remaining', 'rate_limit_remaining'), ('X-RateLimit-Reset', 'rate_limit_reset')]:
+                        value = response.getheader(header, '')
+                        if isinstance(value, str) and 0 < len(value) <= 12 and value.isdecimal():
+                            result[key] = int(value)
+                return result
             return read_public_response(response, connection, canonical, deadline)
         except (OSError, http.client.HTTPException) as exc:
             # Do not echo URLs, cookies, TLS internals, or server-controlled error data.

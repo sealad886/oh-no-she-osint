@@ -333,9 +333,10 @@ class Engine:
                 WHERE e.case_id=? AND (?='' OR e.kind=?) AND (?='' OR instr(lower(e.value),lower(?))>0)
                 GROUP BY e.id ORDER BY sources DESC,e.kind,e.value LIMIT 500""", (case_id, kind, kind, query, query))]
             evidence = [dict(x) for x in db.execute("""SELECT id,title,source,format,collected_at,sha256,length(raw) AS bytes
-                FROM evidence WHERE case_id=? AND (?='' OR instr(lower(text),lower(?))>0
-                OR instr(lower(title),lower(?))>0 OR instr(lower(source),lower(?))>0)
-                ORDER BY collected_at DESC LIMIT 200""", (case_id, query, query, query, query))]
+                FROM evidence e WHERE case_id=? AND (?='' OR instr(lower(text),lower(?))>0
+                OR instr(lower(title),lower(?))>0 OR instr(lower(source),lower(?))>0
+                OR EXISTS(SELECT 1 FROM workspace_extractions x WHERE x.evidence_id=e.id AND x.case_id=e.case_id AND instr(lower(x.text),lower(?))>0))
+                ORDER BY collected_at DESC LIMIT 200""", (case_id, query, query, query, query, query))]
             counts = dict(db.execute("""SELECT (SELECT count(*) FROM evidence WHERE case_id=?) AS evidence,
                 (SELECT count(*) FROM entities WHERE case_id=?) AS entities,
                 (SELECT count(*) FROM mentions m JOIN evidence e ON e.id=m.evidence_id WHERE e.case_id=?) AS mentions""", (case_id, case_id, case_id)).fetchone())
@@ -350,12 +351,13 @@ class Engine:
             result = dict(row)
             result["mentions"] = [dict(x) for x in db.execute("""SELECT e.kind,e.value,m.start,m.end FROM mentions m
                 JOIN entities e ON e.id=m.entity_id WHERE m.evidence_id=? ORDER BY m.start""", (evidence_id,))]
-            if result["format"] in {"pdf", "docx", "odt", "png", "jpeg", "tiff"}:
-                extraction = db.execute("""SELECT x.id,x.extractor_version,x.text,p.pages,p.status,p.warnings
+            extraction = db.execute("""SELECT x.id,x.extractor_version,x.text,x.text_sha256,x.evidence_sha256,p.pages,p.status,p.warnings
                     FROM workspace_extractions x JOIN workspace_document_pages p ON p.extraction_id=x.id
                     WHERE x.case_id=? AND x.evidence_id=? ORDER BY x.created_at DESC,x.id DESC LIMIT 1""", (case_id, evidence_id)).fetchone()
-                if extraction:
-                    result["document"] = {**dict(extraction), "pages": json.loads(extraction["pages"]), "warnings": json.loads(extraction["warnings"])}
+            if extraction:
+                result["extraction"] = {**dict(extraction), "pages": json.loads(extraction["pages"]), "warnings": json.loads(extraction["warnings"])}
+                if result["format"] in {"pdf", "docx", "odt", "png", "jpeg", "tiff"}:
+                    result["document"] = result["extraction"]
             return result
 
     def entity(self, case_id, entity_id):
